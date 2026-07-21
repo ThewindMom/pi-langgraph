@@ -40,9 +40,19 @@ bun install
 pi -e ./src/index.ts
 ```
 
-## Tool
+## Automatic routing
 
-The extension registers `langgraph_orchestrate`.
+You do not call a skill or name the tool. Ask Pi for the work normally:
+
+```text
+Review this repository's architecture and security in parallel, then give me one prioritized recommendation.
+```
+
+The primary Pi model silently classifies each request. It automatically uses LangGraph when the request contains multiple independent workstreams or a fan-out/fan-in pipeline, derives the task DAG, and keeps a single focused or tightly sequential task in the primary session.
+
+## Tool contract
+
+The extension registers `langgraph_orchestrate` for Pi to call automatically. Its underlying input is:
 
 ```json
 {

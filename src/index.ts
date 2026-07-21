@@ -57,11 +57,12 @@ export default function langGraphExtension(pi: ExtensionAPI): void {
     name: TOOL_NAME,
     label: "LangGraph Orchestrate",
     description:
-      "Execute a dependency-aware task graph. LangGraph owns fan-out, joins, state, and failure routing; Pi workers own model turns, tools, permissions, cancellation, and execution logs.",
-    promptSnippet: "Run dependency-aware parallel Pi workers with LangGraph",
+      "Automatically route multi-part work through a dependency-aware task graph. LangGraph owns fan-out, joins, state, and failure routing; Pi workers own model turns, tools, permissions, cancellation, and execution logs.",
+    promptSnippet: "Automatically orchestrate parallel or dependency-linked work with LangGraph",
     promptGuidelines: [
-      `Use ${TOOL_NAME} only when work has at least two genuinely independent or dependency-linked tasks.`,
-      "Give each task a self-contained prompt and declare every dependency explicitly.",
+      `Silently classify every user request before acting. When it contains two or more genuinely independent workstreams, or work that naturally forms a fan-out/fan-in pipeline, call ${TOOL_NAME} automatically. Do not require the user to name this tool, request orchestration, or invoke a skill.`,
+      `Do not call ${TOOL_NAME} for a single focused task, a short sequential operation, or work whose steps share mutable state and should remain in the primary session.`,
+      "When orchestration applies, derive a minimal DAG yourself: give every worker a self-contained prompt, declare all dependencies explicitly, and add a synthesis node only when the user needs a combined result.",
       "Prefer fail-fast unless downstream work can use partial or failed dependency results.",
     ],
     parameters: orchestrationSchema,
