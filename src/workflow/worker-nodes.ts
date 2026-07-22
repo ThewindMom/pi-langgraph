@@ -4,14 +4,17 @@ import type { MutationExecution, MutationOperation } from "../persistence/mutati
 import {
   InvalidWorkerOutputError,
   parseDiagnostic,
-  parseDiscovery,
   parseFinding,
   parseSynthesis,
   parseVerification,
 } from "./parsers.ts";
+import { executeDiscovery } from "./discovery-worker.ts";
 import { mutationChange } from "./mutation-reconciliation.ts";
 import { task, workerPrompt } from "./worker-prompts.ts";
 import type { SpecialistStateValue, WorkflowStateValue } from "./workflow-state.ts";
+import { isAggregatePlan } from "./compiler.ts";
+import { hostIntegrationVerification } from "./host-verification.ts";
+import type { HostEvidenceExecutor } from "./types.ts";
 
 type ExecuteWorker = (task: OrchestrationTask, objective: string) => Promise<string>;
 type ExecuteMutation = (
@@ -48,24 +51,11 @@ export function createSpecialistNode(execute: ExecuteWorker) {
 
 export function createDiscoverNode(execute: ExecuteWorker) {
   return async (state: WorkflowStateValue) => {
-    const output = await execute(
-      task(
-        "discover",
-        workerPrompt("discovery", state.objective, {
-          instruction:
-            "Inspect the repository and decompose the objective into independent read-only analysis units. Do not edit files.",
-          requiredOutput: {
-            workItems: [{ id: "lexical-id", title: "string", instruction: "self-contained string" }],
-            acceptanceCriteria: ["observable criterion"],
-          },
-        }),
-      ),
-      state.objective,
-    );
-    const discovery = parseDiscovery(output);
+    const result = await executeDiscovery(execute, state.objective, state.plan);
     return {
-      workItems: discovery.workItems,
-      acceptanceCriteria: discovery.acceptanceCriteria,
+      workItems: result.discovery.workItems,
+      acceptanceCriteria: result.discovery.acceptanceCriteria,
+      ...(result.plan === undefined ? {} : { plan: result.plan }),
       phase: "discovered" as const,
       trace: [{ node: "discover" as const, iteration: state.iteration }],
     };
@@ -103,7 +93,11 @@ export function createImplementNode(execute: ExecuteMutation) {
   };
 }
 
-export function createVerifyNode(execute: ExecuteWorker) {
+export function createVerifyNode(
+  execute: ExecuteWorker,
+  evidenceRunner?: HostEvidenceExecutor,
+  signal?: AbortSignal,
+) {
   return async (state: WorkflowStateValue) => {
     const output = await execute(
       task(
@@ -122,15 +116,19 @@ export function createVerifyNode(execute: ExecuteWorker) {
       ),
       state.objective,
     );
-    const verification = parseVerification(output);
+    parseVerification(output);
+    const host = await hostIntegrationVerification(evidenceRunner, signal);
+    const verification = host.verification;
+    const aggregate = state.plan === undefined || isAggregatePlan(state.plan);
     const route = verification.passed
       ? "synthesize"
-      : state.iteration < state.maxIterations
+      : aggregate && state.iteration < state.maxIterations
         ? "diagnose"
         : "escalate";
     return new Command({
       update: {
         verification,
+        evidenceRefs: host.refs,
         phase: "verified" as const,
         trace: [{ node: "verify" as const, route, iteration: state.iteration }],
       },
@@ -204,11 +202,11 @@ export function createSynthesizeNode(execute: ExecuteWorker) {
         "synthesize",
         workerPrompt("evidence synthesis", state.objective, {
           pattern: state.pattern,
-          findings: state.findings,
+          preMutationFindings: state.findings,
           changes: state.changes,
           verification: state.verification,
           unresolvedRisks: state.unresolvedRisks,
-          instruction: "Summarize only the supplied structured evidence. Do not claim unreported checks or changes.",
+          instruction: "Summarize only the supplied structured evidence. Pre-mutation findings describe the initial workspace and must not override later change evidence or trusted host verification. A passing host verification establishes the tested post-mutation behavior. Do not claim unreported checks or changes.",
           requiredOutput: { summary: "concise evidence-based string under 6000 characters" },
         }),
       ),

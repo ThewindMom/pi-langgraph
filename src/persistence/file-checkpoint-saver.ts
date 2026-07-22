@@ -1,42 +1,23 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, readdir, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import type { RunnableConfig } from "@langchain/core/runnables";
 import {
-  BaseCheckpointSaver,
-  MemorySaver,
-  type ChannelVersions,
-  type Checkpoint,
-  type CheckpointListOptions,
-  type CheckpointMetadata,
-  type CheckpointTuple,
-  type PendingWrite,
+  BaseCheckpointSaver, MemorySaver, type ChannelVersions, type Checkpoint, type CheckpointListOptions,
+  type CheckpointMetadata, type CheckpointTuple, type PendingWrite,
 } from "@langchain/langgraph-checkpoint";
-import { validateEffectiveWorkflowState, type PersistedWorkflowWrite } from "./workflow-pending-write-validation.ts";
-import {
-  FILE_SUFFIX,
-  FILE_VERSION,
-  type SerializedCheckpointEntry,
-  type SerializedThread,
-  type SerializedWriteEntry,
-  decode,
-  encode,
-  fileNameForThread,
-  parseSerializedThread,
-  parseWriteBucketKey,
-  validateThreadId,
-} from "./file-checkpoint-format.ts";
-import { validateCheckpoint, validateCheckpointMetadata } from "./file-checkpoint-validation.ts";
+import { FILE_SUFFIX, fileNameForThread, parseSerializedThread, validateThreadId } from "./file-checkpoint-format.ts";
 import { atomicWrite, isNodeErrorCode, readBoundedFile } from "./checkpoint-file-io.ts";
+import {
+  encodeCheckpointThread,
+  hydrateCheckpointThread,
+  type RepositoryCheckpointIdentity,
+} from "./checkpoint-thread-codec.ts";
+import { withCheckpointFileLock } from "./file-lock.ts";
 import { requiredThreadId } from "./checkpoint-config.ts";
 import { restoreThread, snapshotThread } from "./checkpoint-memory-snapshot.ts";
-import { migrateLegacyMutationJournal } from "./legacy-mutation-migration.ts";
 import {
-  claimFromEntry,
-  mutationKey,
-  type MutationClaim,
-  type MutationJournal,
-  type MutationOperation,
+  claimFromEntry, mutationKey, type MutationClaim, type MutationJournal, type MutationOperation,
   type SerializedMutationEntry,
 } from "./mutation-journal.ts";
 
@@ -46,6 +27,8 @@ export class FileCheckpointSaver extends BaseCheckpointSaver implements Mutation
   readonly quarantinedFiles: Array<{ readonly fileName: string; readonly error: string }> = [];
   private readonly corruptFiles = new Map<string, { readonly quarantineName: string; readonly error: string }>();
   private readonly mutations = new Map<string, Record<string, SerializedMutationEntry>>();
+  private readonly fingerprints = new Map<string, string>();
+  private readonly repositorySnapshots = new Map<string, RepositoryCheckpointIdentity>();
   private pending: Promise<void> = Promise.resolve();
 
   private constructor(rootDirectory: string) {
@@ -91,12 +74,26 @@ export class FileCheckpointSaver extends BaseCheckpointSaver implements Mutation
     for await (const tuple of this.memory.list(config, options)) yield tuple;
   }
 
+  async listThreads(): Promise<readonly string[]> {
+    await this.pending;
+    return Object.keys(this.memory.storage).sort();
+  }
+
+  bindRepositorySnapshot(threadId: string, identity: RepositoryCheckpointIdentity): void {
+    validateThreadId(threadId);
+    this.repositorySnapshots.set(threadId, identity);
+  }
+
   async put(config: RunnableConfig, checkpoint: Checkpoint, metadata: CheckpointMetadata, _newVersions: ChannelVersions): Promise<RunnableConfig> {
-    return this.enqueue(async () => {
-      const threadId = requiredThreadId(config);
+    const threadId = requiredThreadId(config);
+    return this.mutateThread(threadId, async () => {
       const snapshot = snapshotThread(this.memory, threadId);
       try {
-        const result = await this.memory.put(config, checkpoint, metadata);
+        const repositorySnapshot = this.repositorySnapshots.get(threadId);
+        const storedMetadata = repositorySnapshot === undefined
+          ? metadata
+          : { ...metadata, repositorySnapshot };
+        const result = await this.memory.put(config, checkpoint, storedMetadata);
         await this.persistThread(threadId);
         return result;
       } catch (error) {
@@ -107,8 +104,8 @@ export class FileCheckpointSaver extends BaseCheckpointSaver implements Mutation
   }
 
   async putWrites(config: RunnableConfig, writes: PendingWrite[], taskId: string): Promise<void> {
-    return this.enqueue(async () => {
-      const threadId = requiredThreadId(config);
+    const threadId = requiredThreadId(config);
+    return this.mutateThread(threadId, async () => {
       const snapshot = snapshotThread(this.memory, threadId);
       try {
         await this.memory.putWrites(config, writes, taskId);
@@ -120,11 +117,30 @@ export class FileCheckpointSaver extends BaseCheckpointSaver implements Mutation
     });
   }
 
+  async putWritesBatch(
+    config: RunnableConfig,
+    groups: readonly { readonly taskId: string; readonly writes: PendingWrite[] }[],
+  ): Promise<void> {
+    const threadId = requiredThreadId(config);
+    return this.mutateThread(threadId, async () => {
+      const snapshot = snapshotThread(this.memory, threadId);
+      try {
+        for (const group of groups) await this.memory.putWrites(config, group.writes, group.taskId);
+        await this.persistThread(threadId);
+      } catch (error) {
+        restoreThread(this.memory, threadId, snapshot);
+        throw error;
+      }
+    });
+  }
+
   async deleteThread(threadId: string): Promise<void> {
-    return this.enqueue(async () => {
-      validateThreadId(threadId);
+    validateThreadId(threadId);
+    return this.mutateThread(threadId, async () => {
       await this.memory.deleteThread(threadId);
       this.mutations.delete(threadId);
+      this.fingerprints.delete(threadId);
+      this.repositorySnapshots.delete(threadId);
       const corrupt = this.corruptFiles.get(fileNameForThread(threadId));
       if (corrupt !== undefined) {
         await unlink(join(this.rootDirectory, corrupt.quarantineName));
@@ -139,8 +155,8 @@ export class FileCheckpointSaver extends BaseCheckpointSaver implements Mutation
   }
 
   async claimMutation(threadId: string, operation: MutationOperation): Promise<MutationClaim> {
-    return this.enqueue(async () => {
-      validateThreadId(threadId);
+    validateThreadId(threadId);
+    return this.mutateThread(threadId, async () => {
       const entries = this.mutations.get(threadId) ?? Object.create(null);
       const key = mutationKey(operation);
       const claim = claimFromEntry(entries[key]);
@@ -159,8 +175,8 @@ export class FileCheckpointSaver extends BaseCheckpointSaver implements Mutation
   }
 
   async completeMutation(threadId: string, operation: MutationOperation, output: string): Promise<void> {
-    return this.enqueue(async () => {
-      validateThreadId(threadId);
+    validateThreadId(threadId);
+    return this.mutateThread(threadId, async () => {
       const entries = this.mutations.get(threadId);
       const key = mutationKey(operation);
       if (entries?.[key]?.status !== "started") throw new Error(`mutation ${key} has no active claim`);
@@ -174,85 +190,46 @@ export class FileCheckpointSaver extends BaseCheckpointSaver implements Mutation
     });
   }
 
+  private mutateThread<T>(threadId: string, operation: () => Promise<T>): Promise<T> {
+    return this.enqueue(() => withCheckpointFileLock(this.rootDirectory, threadId, async () => {
+      await this.refreshThread(threadId);
+      return operation();
+    }));
+  }
+
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.pending.then(operation, operation);
     this.pending = result.then(() => undefined, () => undefined);
     return result;
   }
 
-  private async loadFile(fileName: string): Promise<void> {
+  private async loadFile(fileName: string, source?: string): Promise<void> {
     const path = join(this.rootDirectory, fileName);
-    const raw = await readBoundedFile(path);
+    const raw = source ?? await readBoundedFile(path);
     const value = parseSerializedThread(raw, path);
     if (fileName !== fileNameForThread(value.threadId)) throw new Error(`checkpoint filename does not match its thread id: ${path}`);
-    const namespaces: MemorySaver["storage"][string] = Object.create(null);
-    const rootWorkflowStates = new Map<string, Readonly<Record<string, unknown>>>();
-    for (const [namespace, checkpoints] of Object.entries(value.storage)) {
-      const hydrated: MemorySaver["storage"][string][string] = Object.create(null);
-      for (const [checkpointId, entry] of Object.entries(checkpoints)) {
-        const checkpoint = decode(entry.checkpoint);
-        const metadata = decode(entry.metadata);
-        const deserializedCheckpoint: unknown = await this.serde.loadsTyped("json", checkpoint);
-        const deserializedMetadata: unknown = await this.serde.loadsTyped("json", metadata);
-        const channelValues = validateCheckpoint(deserializedCheckpoint, namespace, checkpointId);
-        validateCheckpointMetadata(deserializedMetadata);
-        if (namespace === "") rootWorkflowStates.set(checkpointId, channelValues);
-        hydrated[checkpointId] = [checkpoint, metadata, entry.parentCheckpointId];
-      }
-      namespaces[namespace] = hydrated;
-    }
-    const hydratedWrites: Array<[string, MemorySaver["writes"][string]]> = [];
-    for (const [outerKey, entries] of Object.entries(value.writes)) {
-      const bucket = parseWriteBucketKey(outerKey);
-      if (bucket.threadId !== value.threadId) throw new Error(`checkpoint write key belongs to a different thread in ${path}`);
-      const hydrated: MemorySaver["writes"][string] = Object.create(null);
-      const pendingWorkflowWrites: PersistedWorkflowWrite[] = [];
-      for (const entry of entries) {
-        const serialized = decode(entry.value);
-        const deserializedValue: unknown = await this.serde.loadsTyped("json", serialized);
-        pendingWorkflowWrites.push({ channel: entry.channel, value: deserializedValue });
-        hydrated[entry.key] = [entry.taskId, entry.channel, serialized];
-      }
-      if (bucket.namespace === "") {
-        const baseState = rootWorkflowStates.get(bucket.checkpointId);
-        if (baseState === undefined) throw new Error(`checkpoint writes reference a missing root checkpoint in ${path}`);
-        validateEffectiveWorkflowState(baseState, pendingWorkflowWrites);
-      }
-      hydratedWrites.push([outerKey, hydrated]);
-    }
-    this.memory.storage[value.threadId] = namespaces;
-    for (const [outerKey, writes] of hydratedWrites) this.memory.writes[outerKey] = writes;
-    const mutations = value.sourceVersion === 1
-      ? migrateLegacyMutationJournal(rootWorkflowStates)
-      : { ...value.mutations };
-    this.mutations.set(value.threadId, mutations);
+    this.mutations.set(value.threadId, { ...await hydrateCheckpointThread(this.memory, value, path) });
+    this.fingerprints.set(value.threadId, fingerprint(raw));
     await chmod(path, 0o600);
   }
 
+  private async refreshThread(threadId: string): Promise<void> {
+    try {
+      const fileName = fileNameForThread(threadId);
+      const raw = await readBoundedFile(join(this.rootDirectory, fileName));
+      if (this.fingerprints.get(threadId) !== fingerprint(raw)) await this.loadFile(fileName, raw);
+    } catch (error) {
+      if (!isNodeErrorCode(error, "ENOENT")) throw error;
+      restoreThread(this.memory, threadId, { writes: [] });
+      this.mutations.delete(threadId);
+      this.fingerprints.delete(threadId);
+    }
+  }
+
   private async persistThread(threadId: string): Promise<void> {
-    validateThreadId(threadId);
-    const storage: MemorySaver["storage"][string] = this.memory.storage[threadId] ?? Object.create(null);
-    const serializedStorage: Record<string, Record<string, SerializedCheckpointEntry>> = Object.create(null);
-    for (const [namespace, checkpoints] of Object.entries(storage)) {
-      const serializedCheckpoints: Record<string, SerializedCheckpointEntry> = Object.create(null);
-      for (const [checkpointId, [checkpoint, metadata, parentCheckpointId]] of Object.entries(checkpoints)) {
-        serializedCheckpoints[checkpointId] = { checkpoint: encode(checkpoint), metadata: encode(metadata), ...(parentCheckpointId === undefined ? {} : { parentCheckpointId }) };
-      }
-      serializedStorage[namespace] = serializedCheckpoints;
-    }
-    const serializedWrites: Record<string, SerializedWriteEntry[]> = Object.create(null);
-    for (const [outerKey, writes] of Object.entries(this.memory.writes)) {
-      if (parseWriteBucketKey(outerKey).threadId !== threadId) continue;
-      serializedWrites[outerKey] = Object.entries(writes).map(([key, [taskId, channel, value]]) => ({ key, taskId, channel, value: encode(value) }));
-    }
-    const data: SerializedThread = {
-      version: FILE_VERSION,
-      threadId,
-      storage: serializedStorage,
-      writes: serializedWrites,
-      mutations: this.mutations.get(threadId) ?? Object.create(null),
-    };
-    await atomicWrite(this.rootDirectory, this.pathForThread(threadId), `${JSON.stringify(data)}\n`);
+    const raw = encodeCheckpointThread(this.memory, threadId, this.mutations.get(threadId) ?? Object.create(null));
+    await atomicWrite(this.rootDirectory, this.pathForThread(threadId), raw);
+    this.fingerprints.set(threadId, fingerprint(raw));
   }
 
   private pathForThread(threadId: string): string { return join(this.rootDirectory, fileNameForThread(threadId)); }
@@ -261,4 +238,8 @@ export class FileCheckpointSaver extends BaseCheckpointSaver implements Mutation
     const corrupt = this.corruptFiles.get(fileNameForThread(threadId));
     if (corrupt !== undefined) throw new Error(`checkpoint is corrupt for thread ${JSON.stringify(threadId)}: ${corrupt.error}`);
   }
+}
+
+function fingerprint(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
 }

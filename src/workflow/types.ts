@@ -1,8 +1,12 @@
 import type { BaseCheckpointSaver } from "@langchain/langgraph-checkpoint";
+import type { ArtifactRef, HostEvidence } from "../evidence/types.ts";
 import type { ProgressReporter, TaskExecutor } from "../types.ts";
+import type { WorkflowEvent } from "./stream-events.ts";
 
 export const MAX_WORK_ITEMS = 16;
 export const MAX_REPAIR_ITERATIONS = 5;
+export const MAX_PLAN_CHANGES = 16;
+export const MAX_PLAN_DEPENDENCIES = 16;
 
 export type WorkflowPattern = "delivery" | "review";
 export type ApprovalPolicy = "none" | "before_changes";
@@ -17,6 +21,40 @@ export type WorkflowPhase =
   | "repaired"
   | "synthesized"
   | "escalated";
+
+export type PlanChangeStatus = "pending" | "claimed" | "applied" | "failed";
+
+export interface PlanScope {
+  readonly files: readonly string[];
+}
+
+export interface PlanRisk {
+  readonly level: "low" | "medium" | "high";
+  readonly reasons: readonly string[];
+}
+
+export interface PackageScriptCheck {
+  readonly kind: "package_script";
+  readonly script: string;
+}
+
+export interface PlanChange {
+  readonly changeId: string;
+  readonly title: string;
+  readonly instruction: string;
+  readonly dependsOn: readonly string[];
+  readonly scope: PlanScope;
+  readonly risk: PlanRisk;
+  readonly acceptanceChecks: readonly PackageScriptCheck[];
+  readonly status: PlanChangeStatus;
+}
+
+export interface ExecutionPlan {
+  readonly version: 1;
+  readonly planId: string;
+  readonly revision: number;
+  readonly changes: readonly PlanChange[];
+}
 
 export interface CodingWorkflowInput {
   readonly objective: string;
@@ -41,6 +79,7 @@ export interface WorkItem {
 export interface DiscoveryResult {
   readonly workItems: readonly WorkItem[];
   readonly acceptanceCriteria: readonly string[];
+  readonly executionPlan?: ExecutionPlan;
 }
 
 export interface FindingEvidence {
@@ -83,6 +122,42 @@ export interface DiagnosticResult {
   readonly repairInstructions: readonly string[];
 }
 
+export type ChangeExecutionStatus = "pending" | "running" | "passed" | "failed" | "needs_attention";
+
+export interface ChangeResult {
+  readonly changeId: string;
+  readonly status: ChangeExecutionStatus;
+  readonly attempt: number;
+  readonly evidenceRefs: readonly ArtifactRef[];
+  readonly change?: ChangeSet;
+  readonly verification?: VerificationResult;
+}
+
+export type InterruptBinding = {
+  readonly interruptId: string;
+  readonly changeId: string;
+  readonly planId: string;
+  readonly revision: number;
+  readonly attempt: number;
+  readonly scope: PlanScope;
+  readonly allowedScripts: readonly string[];
+  readonly threadId?: string;
+  readonly checkpointId?: string;
+};
+
+export type ScopedInterrupt = InterruptBinding & {
+  readonly reasons: readonly string[];
+};
+
+export type InterruptDecision = InterruptBinding & {
+  readonly action: "approve" | "reject";
+};
+
+export interface HostEvidenceExecutor {
+  defaultIntegrationScripts?(): Promise<readonly string[]>;
+  runPackageScript(script: string, signal?: AbortSignal): Promise<HostEvidence>;
+}
+
 export interface WorkflowTraceEvent {
   readonly node:
     | "classify"
@@ -114,6 +189,9 @@ export interface CodingWorkflowResult {
   readonly iteration: number;
   readonly summary: string;
   readonly trace: readonly WorkflowTraceEvent[];
+  readonly plan?: ExecutionPlan;
+  readonly changeResults: readonly ChangeResult[];
+  readonly evidenceRefs: readonly ArtifactRef[];
 }
 
 export interface ApprovalRequiredResult {
@@ -129,6 +207,7 @@ export interface ApprovalRequiredResult {
   readonly unresolvedRisks?: readonly string[];
   readonly iteration?: number;
   readonly summary?: string;
+  readonly interrupt: ScopedInterrupt;
 }
 
 export type CodingRunResult = CodingWorkflowResult | ApprovalRequiredResult;
@@ -141,10 +220,13 @@ export interface CodingRunOptions {
   readonly retainCheckpoint?: boolean;
   readonly requireApproval?: boolean;
   readonly nodeTimeoutMs?: number;
+  readonly evidenceRunner?: HostEvidenceExecutor;
+  readonly onEvent?: (event: WorkflowEvent) => void;
 }
 
 export interface ResumeRunOptions extends Omit<CodingRunOptions, "threadId" | "requireApproval"> {
   readonly approved?: boolean;
+  readonly decision?: InterruptDecision;
 }
 
 export interface WorkflowRuntimeDependencies {
@@ -152,4 +234,5 @@ export interface WorkflowRuntimeDependencies {
   readonly signal?: AbortSignal;
   readonly onProgress?: ProgressReporter;
   readonly nodeTimeoutMs: number;
+  readonly evidenceRunner?: HostEvidenceExecutor;
 }

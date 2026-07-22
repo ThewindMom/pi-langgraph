@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { runCodingWorkflow } from "../src/workflow/runtime.ts";
 import type { TaskExecutor } from "../src/types.ts";
+import { passingEvidenceRunner } from "./helpers/evidence.ts";
 
 test("specialist discoveries trigger a bounded second dynamic Send wave", async () => {
   const calls: string[] = [];
@@ -63,7 +64,7 @@ test("specialist discoveries trigger a bounded second dynamic Send wave", async 
   const result = await runCodingWorkflow(
     { objective: "Implement the application across all discovered subsystems" },
     executor,
-    { threadId: "dynamic-replan", retainCheckpoint: true },
+    { threadId: "dynamic-replan", retainCheckpoint: true, evidenceRunner: passingEvidenceRunner() },
   );
 
   expect(result.status).toBe("completed");

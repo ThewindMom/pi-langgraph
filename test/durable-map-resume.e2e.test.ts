@@ -5,10 +5,12 @@ import { tmpdir } from "node:os";
 import { FileCheckpointSaver } from "../src/persistence/file-checkpoint-saver.ts";
 import { resumeCodingWorkflow, runCodingWorkflow } from "../src/workflow/runtime.ts";
 import type { TaskExecutor } from "../src/types.ts";
+import { passingEvidenceRunner } from "./helpers/evidence.ts";
 
 test("resumes a dynamic map after process-style restart without rerunning successful siblings", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-langgraph-resume-"));
   const counts = new Map<string, number>();
+  const evidenceRunner = passingEvidenceRunner();
   let interrupted = true;
   const executor: TaskExecutor = {
     async execute(request) {
@@ -53,7 +55,7 @@ test("resumes a dynamic map after process-style restart without rerunning succes
       runCodingWorkflow(
         { objective: "Update client, server, and schema" },
         executor,
-        { checkpointer: firstSaver, threadId: "durable-thread", retainCheckpoint: true },
+        { checkpointer: firstSaver, threadId: "durable-thread", retainCheckpoint: true, evidenceRunner },
       ),
     ).rejects.toThrow("simulated interruption");
 
@@ -69,6 +71,7 @@ test("resumes a dynamic map after process-style restart without rerunning succes
     const result = await resumeCodingWorkflow("durable-thread", executor, {
       checkpointer: reopenedSaver,
       retainCheckpoint: true,
+      evidenceRunner,
     });
 
     expect(result.status).toBe("completed");

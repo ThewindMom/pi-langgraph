@@ -6,6 +6,7 @@ import { expect, test } from "bun:test";
 import { FileCheckpointSaver } from "../src/persistence/file-checkpoint-saver.ts";
 import { resumeCodingWorkflow, runCodingWorkflow } from "../src/workflow/runtime.ts";
 import type { ProgressEvent, TaskExecutor } from "../src/types.ts";
+import { passingEvidenceRunner } from "./helpers/evidence.ts";
 
 function successfulOutput(taskId: string): string {
   if (taskId === "discover") {
@@ -143,7 +144,7 @@ test("workflow progress never reports a completed count above its dynamically ob
   const result = await runCodingWorkflow(
     { objective: "Implement core" },
     executor,
-    { threadId: "progress-invariant", retainCheckpoint: true, onProgress: (update) => updates.push(update) },
+    { threadId: "progress-invariant", retainCheckpoint: true, evidenceRunner: passingEvidenceRunner(), onProgress: (update) => updates.push(update) },
   );
 
   expect(result.status).toBe("completed");

@@ -9,6 +9,7 @@ export type FailurePolicy = "fail-fast" | "continue";
 export interface OrchestrationTask {
   readonly id: string;
   readonly prompt: string;
+  readonly allowedFiles?: readonly string[];
   readonly dependsOn?: readonly string[];
   readonly agent?: string;
   readonly model?: string;
@@ -48,6 +49,19 @@ export interface ProgressEvent {
   readonly total: number;
   readonly message?: string;
 }
+
+export type TaskLifecycleStatus = "started" | "running" | "completed" | "failed" | "cancelled";
+
+export interface TaskLifecycleEvent {
+  readonly taskId: string;
+  readonly status: TaskLifecycleStatus;
+  readonly message?: string;
+}
+
+export interface TaskExecutionOptions {
+  readonly onEvent?: (event: TaskLifecycleEvent) => void;
+  readonly workingDirectory?: string;
+}
 export interface OrchestrationProgress {
   readonly objective: string;
   readonly status: "running";
@@ -60,7 +74,7 @@ export type OrchestrationDetails = OrchestrationResult | OrchestrationProgress;
 export type ProgressReporter = (event: ProgressEvent) => void;
 
 export interface TaskExecutor {
-  execute(request: ExecutionRequest, signal?: AbortSignal): Promise<string>;
+  execute(request: ExecutionRequest, signal?: AbortSignal, options?: TaskExecutionOptions): Promise<string>;
 }
 
 export type ExecuteTool = (

@@ -35,10 +35,17 @@ export async function atomicWrite(directory: string, destination: string, conten
     try {
       await handle.writeFile(contents, "utf8");
       await handle.chmod(0o600);
+      await handle.sync();
     } finally {
       await handle.close();
     }
     await rename(temporary, destination);
+    const directoryHandle = await open(directory, "r");
+    try {
+      await directoryHandle.sync();
+    } finally {
+      await directoryHandle.close();
+    }
   } catch (error) {
     try {
       await unlink(temporary);

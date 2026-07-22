@@ -18,8 +18,10 @@ import { FileCheckpointSaver } from "../src/persistence/file-checkpoint-saver.ts
 import type { MutationClaim, MutationJournal, MutationOperation } from "../src/persistence/mutation-journal.ts";
 import type { TaskExecutor } from "../src/types.ts";
 import { resumeCodingWorkflow, runCodingWorkflow } from "../src/workflow/runtime.ts";
+import { passingEvidenceRunner } from "./helpers/evidence.ts";
 
 test("replays a completed mutation after its journal commit but before the graph checkpoint", async () => {
+  const evidenceRunner = passingEvidenceRunner();
   const root = await mkdtemp(join(tmpdir(), "pi-langgraph-completed-replay-"));
   let implementationCalls = 0;
   const executor: TaskExecutor = {
@@ -49,13 +51,14 @@ test("replays a completed mutation after its journal commit but before the graph
     await expect(runCodingWorkflow(
       { objective: "Implement core" },
       executor,
-      { checkpointer: crashing, threadId: "completed-replay", retainCheckpoint: true },
+      { checkpointer: crashing, threadId: "completed-replay", retainCheckpoint: true, evidenceRunner },
     )).rejects.toThrow("crash after mutation result persistence");
 
     const reopened = await FileCheckpointSaver.open(directory);
     const result = await resumeCodingWorkflow("completed-replay", executor, {
       checkpointer: reopened,
       retainCheckpoint: true,
+      evidenceRunner,
     });
     expect(result.status).toBe("completed");
     expect(implementationCalls).toBe(1);
@@ -71,11 +74,12 @@ test("normalizes a valid version-one checkpoint file to an empty mutation journa
     JSON.stringify({ version: 1, threadId: "legacy", storage: {}, writes: {} }),
     "legacy.checkpoint.json",
   );
-  expect(parsed.version).toBe(2);
+  expect(parsed.version).toBe(3);
   expect(parsed.mutations).toEqual({});
 });
 
 test("deleting a completed MemorySaver thread also clears its mutation journal", async () => {
+  const evidenceRunner = passingEvidenceRunner();
   const saver = new MemorySaver();
   let implementationCalls = 0;
   const executor: TaskExecutor = {
@@ -101,12 +105,12 @@ test("deleting a completed MemorySaver thread also clears its mutation journal",
   await runCodingWorkflow(
     { objective: "First implementation" },
     executor,
-    { checkpointer: saver, threadId: "reused-memory-thread" },
+    { checkpointer: saver, threadId: "reused-memory-thread", evidenceRunner },
   );
   const second = await runCodingWorkflow(
     { objective: "Second implementation" },
     executor,
-    { checkpointer: saver, threadId: "reused-memory-thread", retainCheckpoint: true },
+    { checkpointer: saver, threadId: "reused-memory-thread", retainCheckpoint: true, evidenceRunner },
   );
   expect(implementationCalls).toBe(2);
   if (second.status !== "completed") throw new Error("second workflow did not complete");

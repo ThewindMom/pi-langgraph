@@ -9,16 +9,39 @@ export interface DurableInvocationConfig extends LangGraphRunnableConfig {
   readonly durability: "sync";
 }
 
+export interface WorkflowStreamConfig extends DurableInvocationConfig {
+  readonly streamMode: ("updates" | "custom" | "tasks" | "checkpoints")[];
+  readonly subgraphs: true;
+}
+
+export type InvocationIdentity = {
+  readonly threadId: string;
+  readonly runId: string;
+};
+
 export function invocationConfig(
-  threadId: string,
+  identity: InvocationIdentity,
   recursionLimit: number,
   signal: AbortSignal | undefined,
 ): DurableInvocationConfig {
   return {
-    configurable: { thread_id: threadId },
+    configurable: { thread_id: identity.threadId },
+    runId: identity.runId,
     recursionLimit,
     durability: "sync",
     ...(signal === undefined ? {} : { signal }),
+  };
+}
+
+export function streamInvocationConfig(
+  identity: InvocationIdentity,
+  recursionLimit: number,
+  signal: AbortSignal | undefined,
+): WorkflowStreamConfig {
+  return {
+    ...invocationConfig(identity, recursionLimit, signal),
+    streamMode: ["updates", "custom", "tasks", "checkpoints"],
+    subgraphs: true,
   };
 }
 
@@ -27,10 +50,9 @@ export function readSavedControlState(tuple: CheckpointTuple): {
   readonly approvalRequired: boolean;
   readonly phase: WorkflowPhase;
 } {
-  const values = tuple.checkpoint.channel_values;
-  const maxIterations = values.maxIterations;
-  const approvalRequired = values.approvalRequired;
-  const phase = phaseValue(values.phase);
+  const maxIterations = checkpointChannelValue(tuple, "maxIterations");
+  const approvalRequired = checkpointChannelValue(tuple, "approvalRequired");
+  const phase = phaseValue(checkpointChannelValue(tuple, "phase"));
   if (
     typeof maxIterations !== "number" ||
     !Number.isInteger(maxIterations) ||
@@ -42,6 +64,21 @@ export function readSavedControlState(tuple: CheckpointTuple): {
     throw new Error("checkpoint contains invalid workflow control state");
   }
   return { recursionLimit: workflowRecursionLimit(maxIterations), approvalRequired, phase };
+}
+
+export function checkpointChannelValue(tuple: CheckpointTuple, channel: string): unknown {
+  const pending = tuple.pendingWrites?.findLast((write) => write[1] === channel);
+  return pending?.[2] ?? tuple.checkpoint.channel_values[channel];
+}
+
+export function hasPendingGraphInterrupt(tuple: CheckpointTuple): boolean {
+  return tuple.pendingWrites?.some(([, channel]) => channel === "__interrupt__") ?? false;
+}
+
+export function pendingGraphInterruptValue(tuple: CheckpointTuple): unknown {
+  const pending = tuple.pendingWrites?.findLast(([, channel]) => channel === "__interrupt__");
+  const interrupt = pending?.[2];
+  return isRecord(interrupt) ? interrupt.value : undefined;
 }
 
 function phaseValue(value: unknown): WorkflowPhase | undefined {
@@ -59,6 +96,10 @@ function phaseValue(value: unknown): WorkflowPhase | undefined {
     return value;
   }
   return undefined;
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export async function withThreadLease<T>(threadId: string, operation: () => Promise<T>): Promise<T> {

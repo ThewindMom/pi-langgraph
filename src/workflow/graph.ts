@@ -1,17 +1,26 @@
 import { END, START, StateGraph } from "@langchain/langgraph";
 import type { BaseCheckpointSaver } from "@langchain/langgraph-checkpoint";
 import type { ExecutionRequest, OrchestrationTask } from "../types.ts";
+import { RepositoryIsolationError } from "../repository/mutation-scope.ts";
 import type {
   MutationExecution,
   MutationJournal,
   MutationOperation,
 } from "../persistence/mutation-journal.ts";
-import { classifyNode, collectNode, dispatchNode, escalateNode, routeDispatch } from "./routing-nodes.ts";
+import {
+  classifyNode,
+  collectNode,
+  createPrepareChangeNode,
+  dispatchNode,
+  escalateNode,
+  routeDispatch,
+  routePreparedChange,
+} from "./routing-nodes.ts";
 import type { WorkflowRuntimeDependencies } from "./types.ts";
+import { compileChangeSubgraph } from "./change-subgraph.ts";
 import {
   createDiagnoseNode,
   createDiscoverNode,
-  createImplementNode,
   createRepairNode,
   createSpecialistNode,
   createSynthesizeNode,
@@ -28,7 +37,6 @@ export interface CompileCodingGraphOptions {
   readonly checkpointer: BaseCheckpointSaver;
   readonly mutationJournal: MutationJournal;
   readonly threadId: string;
-  readonly interruptBeforeMutation?: boolean;
 }
 
 export function compileCodingGraph(
@@ -43,7 +51,7 @@ export function compileCodingGraph(
     maxInterval: 25,
     jitter: false,
     logWarning: false,
-    retryOn: (_error: unknown) => true,
+    retryOn: shouldRetryWorkerError,
   };
 
   const execute = async (task: OrchestrationTask, objective: string): Promise<string> => {
@@ -96,6 +104,13 @@ export function compileCodingGraph(
     .addEdge(START, "analyze")
     .addEdge("analyze", END)
     .compile({ name: "coding-specialist" });
+  const changeSubgraph = compileChangeSubgraph({
+    executeMutation,
+    threadId: options.threadId,
+    nodeTimeout,
+    ...(dependencies.evidenceRunner === undefined ? {} : { evidenceRunner: dependencies.evidenceRunner }),
+    ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
+  });
 
   const graph = new StateGraph(WorkflowState)
     .addNode("classify", classifyNode)
@@ -103,10 +118,11 @@ export function compileCodingGraph(
     .addNode("specialist", specialistSubgraph, { input: SpecialistState })
     .addNode("dispatch", dispatchNode)
     .addNode("collect", collectNode)
-    .addNode("implement", createImplementNode(executeMutation), { timeout: nodeTimeout })
+    .addNode("prepare_change", createPrepareChangeNode(options.threadId))
+    .addNode("change", changeSubgraph)
     .addNode(
       "verify",
-      createVerifyNode(execute),
+      createVerifyNode(execute, dependencies.evidenceRunner, dependencies.signal),
       { retryPolicy, timeout: nodeTimeout, ends: ["synthesize", "diagnose", "escalate"] },
     )
     .addNode("diagnose", createDiagnoseNode(execute), { retryPolicy, timeout: nodeTimeout })
@@ -119,15 +135,16 @@ export function compileCodingGraph(
     .addConditionalEdges("dispatch", routeDispatch)
     .addEdge("specialist", "collect")
     .addEdge("collect", "dispatch")
-    .addEdge("implement", "verify")
+    .addConditionalEdges("prepare_change", routePreparedChange)
+    .addEdge("change", "prepare_change")
     .addEdge("diagnose", "repair")
     .addEdge("repair", "verify")
     .addEdge("synthesize", END)
     .addEdge("escalate", END);
 
-  return graph.compile({
-    checkpointer: options.checkpointer,
-    name: "pi-coding-workflow",
-    ...(options.interruptBeforeMutation ? { interruptBefore: ["implement"] } : {}),
-  });
+  return graph.compile({ checkpointer: options.checkpointer, name: "pi-coding-workflow" });
+}
+
+export function shouldRetryWorkerError(error: unknown): boolean {
+  return !(error instanceof RepositoryIsolationError);
 }

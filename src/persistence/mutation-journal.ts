@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { MemorySaver, type BaseCheckpointSaver } from "@langchain/langgraph-checkpoint";
 
 export type MutationKind = "implement" | "repair";
@@ -5,6 +6,10 @@ export type MutationKind = "implement" | "repair";
 export interface MutationOperation {
   readonly kind: MutationKind;
   readonly iteration: number;
+  readonly workspaceId?: string;
+  readonly planId?: string;
+  readonly changeId?: string;
+  readonly attempt?: number;
 }
 
 export type MutationClaim =
@@ -57,7 +62,27 @@ export function mutationKey(operation: MutationOperation): string {
   if (!Number.isSafeInteger(operation.iteration) || operation.iteration < 0) {
     throw new Error("mutation iteration must be a non-negative safe integer");
   }
-  return `${operation.kind}:${operation.iteration}`;
+  const { workspaceId, planId, changeId, attempt } = operation;
+  if (workspaceId === undefined && planId === undefined && changeId === undefined && attempt === undefined) {
+    return `${operation.kind}:${operation.iteration}`;
+  }
+  if (workspaceId === undefined || planId === undefined || changeId === undefined || attempt === undefined) {
+    throw new Error("scoped mutation identity requires workspaceId, planId, changeId, and attempt");
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(workspaceId)) {
+    throw new Error("mutation workspaceId must be a 1-128 character lexical identifier");
+  }
+  if (!/^[A-Za-z][A-Za-z0-9._-]{0,127}$/.test(planId)) {
+    throw new Error("mutation planId must be a 1-128 character lexical identifier");
+  }
+  if (!/^[A-Za-z][A-Za-z0-9_-]{0,47}$/.test(changeId)) {
+    throw new Error("mutation changeId must be a 1-48 character lexical identifier");
+  }
+  if (!Number.isSafeInteger(attempt) || attempt < 0) {
+    throw new Error("mutation attempt must be a non-negative safe integer");
+  }
+  const identity = createHash("sha256").update(`${workspaceId}\0${planId}\0${changeId}`).digest("hex");
+  return `v3:${identity}:${operation.kind}:${attempt}`;
 }
 
 export function claimFromEntry(entry: SerializedMutationEntry | undefined): MutationClaim {

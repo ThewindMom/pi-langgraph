@@ -1,9 +1,10 @@
 import {
   isPersistedWorkflowChannel,
-  validatePersistedWorkflowChannels,
+  validatePersistedWorkflowWrite,
 } from "./workflow-state-validation.ts";
 
-const APPEND_CHANNELS = new Set(["findings", "changes", "unresolvedRisks", "trace"]);
+const APPEND_CHANNELS = new Set(["findings", "changes", "unresolvedRisks", "trace", "changeResults", "evidenceRefs"]);
+const OPTIONAL_APPEND_CHANNELS = new Set(["changeResults", "evidenceRefs"]);
 
 export interface PersistedWorkflowWrite {
   readonly channel: string;
@@ -17,10 +18,9 @@ export function validateEffectiveWorkflowState(
   const workflowWrites = pendingWrites.filter((write) => isPersistedWorkflowChannel(write.channel));
   if (workflowWrites.length === 0) return;
   if (!isRecord(baseValue)) throw new Error("invalid pending workflow checkpoint state");
-
-  const effectiveState: Record<string, unknown> = { ...baseValue };
   const updatesByChannel = new Map<string, unknown[]>();
   for (const write of workflowWrites) {
+    validatePersistedWorkflowWrite(write.channel, write.value);
     const updates = updatesByChannel.get(write.channel) ?? [];
     updates.push(write.value);
     updatesByChannel.set(write.channel, updates);
@@ -28,18 +28,15 @@ export function validateEffectiveWorkflowState(
 
   for (const [channel, updates] of updatesByChannel) {
     if (APPEND_CHANNELS.has(channel)) {
-      const current = effectiveState[channel];
-      if (!Array.isArray(current) || updates.some((update) => !Array.isArray(update))) {
+      const current = baseValue[channel];
+      const currentValues = current === undefined && OPTIONAL_APPEND_CHANNELS.has(channel) ? [] : current;
+      if (!Array.isArray(currentValues) || updates.some((update) => !Array.isArray(update))) {
         throw new Error(`invalid pending workflow reducer value for ${channel}`);
       }
-      effectiveState[channel] = [...current, ...updates.flatMap((update) => update)];
       continue;
     }
     if (updates.length !== 1) throw new Error(`invalid concurrent pending workflow writes for ${channel}`);
-    effectiveState[channel] = updates[0];
   }
-
-  validatePersistedWorkflowChannels(effectiveState);
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {

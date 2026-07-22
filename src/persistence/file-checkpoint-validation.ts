@@ -4,12 +4,13 @@ import {
   MAX_NAMESPACES,
   validateStorageKey,
 } from "./file-checkpoint-format.ts";
-import { validatePersistedWorkflowChannels } from "./workflow-state-validation.ts";
+import { validatePersistedWorkflowChannels, validatePersistedWorkflowStructure } from "./workflow-state-validation.ts";
 
 export function validateCheckpoint(
   value: unknown,
   namespace: string,
   checkpointId: string,
+  complete = true,
 ): Readonly<Record<string, unknown>> {
   if (
     !isRecord(value) ||
@@ -43,7 +44,10 @@ export function validateCheckpoint(
       validateChannelVersion(version);
     }
   }
-  if (namespace === "") validatePersistedWorkflowChannels(value.channel_values);
+  if (namespace === "") {
+    if (complete) validatePersistedWorkflowChannels(value.channel_values);
+    else validatePersistedWorkflowStructure(value.channel_values);
+  }
   return value.channel_values;
 }
 

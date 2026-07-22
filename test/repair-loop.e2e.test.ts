@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { runCodingWorkflow } from "../src/workflow/runtime.ts";
 import type { TaskExecutor } from "../src/types.ts";
+import { conditionalEvidenceRunner } from "./helpers/evidence.ts";
 
 test("routes failed verification through a bounded diagnose and repair loop", async () => {
   let verificationCalls = 0;
@@ -56,11 +57,12 @@ test("routes failed verification through a bounded diagnose and repair loop", as
       }
     },
   };
+  const evidenceRunner = conditionalEvidenceRunner(() => verificationCalls === 2);
 
   const result = await runCodingWorkflow(
     { objective: "Implement the API endpoint", maxIterations: 2 },
     executor,
-    { threadId: "repair-once", retainCheckpoint: true },
+    { threadId: "repair-once", retainCheckpoint: true, evidenceRunner },
   );
 
   expect(result.status).toBe("completed");
@@ -122,11 +124,12 @@ test("never delivers an unverified mutation when the repair bound is exhausted",
       throw new Error(`unexpected task ${request.task.id}`);
     },
   };
+  const evidenceRunner = conditionalEvidenceRunner(() => false);
 
   const result = await runCodingWorkflow(
     { objective: "Fix core", maxIterations: 1 },
     executor,
-    { threadId: "repair-exhausted", retainCheckpoint: true },
+    { threadId: "repair-exhausted", retainCheckpoint: true, evidenceRunner },
   );
 
   expect(result.status).toBe("needs_attention");

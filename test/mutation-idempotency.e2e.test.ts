@@ -6,11 +6,13 @@ import { FileCheckpointSaver } from "../src/persistence/file-checkpoint-saver.ts
 import { fileNameForThread } from "../src/persistence/file-checkpoint-format.ts";
 import { resumeCodingWorkflow, runCodingWorkflow } from "../src/workflow/runtime.ts";
 import type { TaskExecutor } from "../src/types.ts";
+import { conditionalEvidenceRunner } from "./helpers/evidence.ts";
 
 test("does not invoke implementation twice after its mutation succeeds but its result is lost", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-langgraph-implement-fence-"));
   let implementationCalls = 0;
   let observableMutations = 0;
+  const evidenceRunner = conditionalEvidenceRunner(() => observableMutations === 1);
   const executor: TaskExecutor = {
     async execute(request) {
       switch (request.task.id) {
@@ -44,7 +46,7 @@ test("does not invoke implementation twice after its mutation succeeds but its r
       runCodingWorkflow(
         { objective: "Implement core", maxIterations: 1 },
         executor,
-        { checkpointer: saver, threadId: "implement-fence", retainCheckpoint: true },
+        { checkpointer: saver, threadId: "implement-fence", retainCheckpoint: true, evidenceRunner },
       ),
     ).rejects.toThrow("crash after implementation mutation");
 
@@ -52,6 +54,7 @@ test("does not invoke implementation twice after its mutation succeeds but its r
     const result = await resumeCodingWorkflow("implement-fence", executor, {
       checkpointer: reopened,
       retainCheckpoint: true,
+      evidenceRunner,
     });
 
     expect(result.status).toBe("completed");
@@ -67,6 +70,7 @@ test("does not invoke the same repair twice after an indeterminate repair result
   let verificationCalls = 0;
   let repairCalls = 0;
   let observableRepairs = 0;
+  const evidenceRunner = conditionalEvidenceRunner(() => verificationCalls > 1 && observableRepairs === 1);
   const executor: TaskExecutor = {
     async execute(request) {
       switch (request.task.id) {
@@ -101,7 +105,7 @@ test("does not invoke the same repair twice after an indeterminate repair result
       runCodingWorkflow(
         { objective: "Repair core", maxIterations: 2 },
         executor,
-        { checkpointer: saver, threadId: "repair-fence", retainCheckpoint: true },
+        { checkpointer: saver, threadId: "repair-fence", retainCheckpoint: true, evidenceRunner },
       ),
     ).rejects.toThrow("crash after repair mutation");
 
@@ -109,6 +113,7 @@ test("does not invoke the same repair twice after an indeterminate repair result
     const result = await resumeCodingWorkflow("repair-fence", executor, {
       checkpointer: reopened,
       retainCheckpoint: true,
+      evidenceRunner,
     });
 
     expect(result.status).toBe("completed");
@@ -146,6 +151,7 @@ test("verifies the workspace when a completed mutation returns an invalid report
   const root = await mkdtemp(join(tmpdir(), "pi-langgraph-invalid-mutation-report-"));
   let implementationCalls = 0;
   let verificationCalls = 0;
+  const evidenceRunner = conditionalEvidenceRunner(() => implementationCalls === 1);
   const executor: TaskExecutor = {
     async execute(request) {
       switch (request.task.id) {
@@ -172,7 +178,7 @@ test("verifies the workspace when a completed mutation returns an invalid report
     const result = await runCodingWorkflow(
       { objective: "Implement core", maxIterations: 1 },
       executor,
-      { checkpointer: saver, threadId: "invalid-mutation-report", retainCheckpoint: true },
+      { checkpointer: saver, threadId: "invalid-mutation-report", retainCheckpoint: true, evidenceRunner },
     );
     expect(result.status).toBe("completed");
     expect(implementationCalls).toBe(1);
@@ -186,6 +192,7 @@ test("verifies the workspace when a completed mutation returns an invalid report
 test("migrates an ambiguous version-one implementation as indeterminate instead of replaying it", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-langgraph-v1-mutation-"));
   let implementationCalls = 0;
+  const evidenceRunner = conditionalEvidenceRunner(() => implementationCalls === 1);
   const executor: TaskExecutor = {
     async execute(request) {
       switch (request.task.id) {
@@ -208,7 +215,7 @@ test("migrates an ambiguous version-one implementation as indeterminate instead 
     await expect(runCodingWorkflow(
       { objective: "Implement legacy core", maxIterations: 1 },
       executor,
-      { checkpointer: saver, threadId: "legacy-mutation", retainCheckpoint: true },
+      { checkpointer: saver, threadId: "legacy-mutation", retainCheckpoint: true, evidenceRunner },
     )).rejects.toThrow("legacy crash after mutation");
 
     const path = join(directory, fileNameForThread("legacy-mutation"));
@@ -222,6 +229,7 @@ test("migrates an ambiguous version-one implementation as indeterminate instead 
     const result = await resumeCodingWorkflow("legacy-mutation", executor, {
       checkpointer: reopened,
       retainCheckpoint: true,
+      evidenceRunner,
     });
     expect(result.status).toBe("completed");
     expect(implementationCalls).toBe(1);

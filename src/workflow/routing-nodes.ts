@@ -1,7 +1,9 @@
 import { Send } from "@langchain/langgraph";
+import { aggregateExecutionPlan } from "./compiler.ts";
 import { InvalidWorkerOutputError } from "./parsers.ts";
+import { interruptForChange } from "./risk-policy.ts";
 import type { WorkflowStateValue } from "./workflow-state.ts";
-import type { WorkItem } from "./types.ts";
+import type { ChangeResult, WorkItem } from "./types.ts";
 import { MAX_WORK_ITEMS } from "./types.ts";
 
 export function classifyNode(state: WorkflowStateValue) {
@@ -57,6 +59,20 @@ export function collectNode(state: WorkflowStateValue) {
 }
 
 export function escalateNode(state: WorkflowStateValue) {
+  const failedChange = [...state.changeResults].reverse().find((result) => result.status === "needs_attention");
+  if (failedChange !== undefined) {
+    const risk = failedChange.verification === undefined
+      ? `Planned change ${failedChange.changeId} was rejected at its approval boundary.`
+      : `Planned change ${failedChange.changeId} still fails after bounded repair.`;
+    return {
+      summary: risk,
+      unresolvedRisks: [risk],
+      verification: failedChange.verification,
+      phase: "escalated" as const,
+      status: "needs_attention" as const,
+      trace: [{ node: "escalate" as const, iteration: state.iteration }],
+    };
+  }
   const suffix = state.maxIterations === 1 ? "iteration" : "iterations";
   const risk = `Verification still fails after ${state.maxIterations} repair ${suffix}.`;
   return {
@@ -83,5 +99,90 @@ export function routeDispatch(state: WorkflowStateValue) {
         }),
     );
   }
-  return state.pattern === "review" ? "synthesize" : "implement";
+  return state.pattern === "review" ? "synthesize" : "prepare_change";
+}
+
+export function createPrepareChangeNode(threadId: string) {
+  return (state: WorkflowStateValue) => {
+    const plan = state.plan ?? aggregateExecutionPlan({
+      threadId,
+      objective: state.objective,
+      discovery: { workItems: state.workItems, acceptanceCriteria: state.acceptanceCriteria },
+      findings: state.findings,
+    });
+    const results = latestResults(state.changeResults);
+    const failed = plan.changes.find((change) => results.get(change.changeId)?.status === "failed");
+    if (failed !== undefined) {
+      const previous = results.get(failed.changeId);
+      if (previous === undefined) throw new Error("failed change result is missing");
+      if (previous.attempt > state.maxIterations) {
+        return { plan, changeResults: [{ ...previous, status: "needs_attention" as const }] };
+      }
+      return selectChange(state, plan, failed.changeId, previous.attempt + 1);
+    }
+    const ready = plan.changes.find((change) => {
+      if (results.has(change.changeId)) return false;
+      return change.dependsOn.every((dependency) => results.get(dependency)?.status === "passed");
+    });
+    if (ready === undefined) return { plan };
+    return selectChange(state, plan, ready.changeId, 1);
+  };
+}
+
+export function routePreparedChange(state: WorkflowStateValue) {
+  const plan = state.plan;
+  if (plan === undefined) throw new Error("execution plan is missing");
+  const results = latestResults(state.changeResults);
+  const change = plan.changes.find((candidate) => results.get(candidate.changeId)?.status === "running");
+  if (change !== undefined) {
+    const current = results.get(change.changeId);
+    if (current === undefined) throw new Error("selected change result is missing");
+    const prior = [...state.changeResults]
+      .slice(0, -1)
+      .reverse()
+      .find((result) => result.changeId === change.changeId);
+    return new Send("change", {
+      objective: state.objective,
+      plan,
+      change,
+      current,
+      previousResult: prior,
+      findings: state.findings,
+      hadGlobalChange: state.changes.length > 0,
+      interrupt: state.interrupt,
+      changes: [],
+      changeResults: [],
+      evidenceRefs: [],
+      unresolvedRisks: [],
+      phase: state.phase,
+      iteration: state.iteration,
+      trace: [],
+      status: state.status,
+    });
+  }
+  if (plan.changes.every((change) => results.get(change.changeId)?.status === "passed")) return "verify";
+  return "escalate";
+}
+
+function selectChange(
+  state: WorkflowStateValue,
+  plan: NonNullable<WorkflowStateValue["plan"]>,
+  changeId: string,
+  attempt: number,
+) {
+  const change = plan.changes.find((candidate) => candidate.changeId === changeId);
+  if (change === undefined) throw new Error("selected planned change is missing");
+  const pendingInterrupt = interruptForChange(plan, change, attempt, state.approvalRequired);
+  const result: ChangeResult = { changeId, status: "running", attempt, evidenceRefs: [] };
+  return {
+    plan,
+    changeResults: [result],
+    interrupt: pendingInterrupt,
+    status: pendingInterrupt === undefined ? "running" as const : "awaiting_approval" as const,
+    ...(pendingInterrupt === undefined ? {} : { phase: "analyzed" as const }),
+  };
+}
+
+function latestResults(results: readonly ChangeResult[]): ReadonlyMap<string, ChangeResult> {
+  return new Map(results.map((result) => [result.changeId, result]));
 }

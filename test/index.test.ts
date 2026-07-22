@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { Check } from "typebox/value";
 import langGraphExtension from "../src/index.ts";
+import { orchestrationSchema } from "../src/runtime/public-contract.ts";
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import type { LangGraphExtensionAPI, RuntimeContext } from "../src/types.ts";
 
@@ -32,10 +34,26 @@ test("registers a safe objective-first coding workflow contract", () => {
 
   expect(registered?.name).toBe("langgraph_orchestrate");
   expect(registered?.executionMode).toBe("sequential");
+  expect(Check(orchestrationSchema, {
+    resumeThreadId: "paused-thread",
+    approved: true,
+  })).toBe(false);
 });
 
 test("executes the autonomous workflow through the registered Pi tool surface", async () => {
   const agentRoot = await mkdtemp(join(tmpdir(), "pi-langgraph-agent-"));
+  const repository = join(agentRoot, "repository");
+  await mkdir(repository);
+  await Bun.write(join(repository, "source.ts"), "export const source = true;\n");
+  await Bun.write(
+    join(repository, "package.json"),
+    JSON.stringify({ packageManager: "bun@1.3.14", scripts: { test: "node -e \"process.exit(0)\"" } }),
+  );
+  runGit(repository, ["init"]);
+  runGit(repository, ["config", "user.name", "Pi LangGraph Test"]);
+  runGit(repository, ["config", "user.email", "pi-langgraph@example.invalid"]);
+  runGit(repository, ["add", "."]);
+  runGit(repository, ["commit", "-m", "source"]);
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = agentRoot;
   let registered: RegisteredTool | undefined;
@@ -49,6 +67,11 @@ test("executes the autonomous workflow through the registered Pi tool surface", 
     async executeTool(_name: string, params: unknown) {
       if (!isRecord(params) || typeof params.name !== "string") throw new Error("invalid native task request");
       calls.push(params.name);
+      if (params.name === "implement") {
+        if (typeof params.cwd !== "string") throw new Error("missing isolated cwd");
+        await mkdir(join(params.cwd, "src"));
+        await Bun.write(join(params.cwd, "src", "api.ts"), "export const api = true;\n");
+      }
       const payload = outputFor(params.name);
       return { content: [{ type: "text" as const, text: JSON.stringify(payload) }], details: { status: "completed" } };
     },
@@ -62,7 +85,7 @@ test("executes the autonomous workflow through the registered Pi tool surface", 
       { objective: "Implement the settings API", threadId: "public-surface" },
       undefined,
       undefined,
-      { cwd: agentRoot, model: undefined },
+      { cwd: repository, model: undefined },
     );
 
     expect(calls).toEqual(["discover", "specialist_api", "implement", "verify", "synthesize"]);
@@ -74,6 +97,11 @@ test("executes the autonomous workflow through the registered Pi tool surface", 
     await rm(agentRoot, { recursive: true, force: true });
   }
 });
+
+function runGit(cwd: string, args: readonly string[]): void {
+  const result = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+  if (result.exitCode !== 0) throw new Error(new TextDecoder().decode(result.stderr));
+}
 
 function outputFor(taskId: string): unknown {
   switch (taskId) {

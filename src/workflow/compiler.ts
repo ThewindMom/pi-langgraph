@@ -2,8 +2,13 @@ import {
   MAX_REPAIR_ITERATIONS,
   type CodingWorkflowInput,
   type CompiledWorkflow,
+  type DiscoveryResult,
+  type ExecutionPlan,
+  type Finding,
   type WorkflowPattern,
 } from "./types.ts";
+import { parseExecutionPlan, validatePlanTransition } from "./execution-plan.ts";
+import { parseWorkerObject } from "./parsers.ts";
 
 const MAX_OBJECTIVE_LENGTH = 12_000;
 const INPUT_FIELDS = new Set(["objective", "workflow", "maxIterations", "approval"]);
@@ -12,6 +17,69 @@ const MUTATION_WORDS = /\b(implement|fix|build|create|add|update|migrate|refacto
 
 export class InvalidWorkflowError extends Error {
   readonly name = "InvalidWorkflowError";
+}
+
+export class InvalidDiscoveryEnvelopeError extends Error {
+  readonly name = "InvalidDiscoveryEnvelopeError";
+}
+
+export interface DiscoveryEnvelope {
+  readonly discoveryText: string;
+  readonly executionPlan?: ExecutionPlan;
+}
+
+export function decodeDiscoveryEnvelope(text: string, previousPlan?: ExecutionPlan): DiscoveryEnvelope {
+  const value = parseWorkerObject(text, "discovery");
+  if (value.executionPlan === undefined) return { discoveryText: JSON.stringify(value) };
+  const allowed = new Set(["workItems", "acceptanceCriteria", "executionPlan"]);
+  for (const field of Object.keys(value)) {
+    if (!allowed.has(field)) throw new InvalidDiscoveryEnvelopeError(`discovery contains unsupported field ${JSON.stringify(field)}`);
+  }
+  const executionPlan = parseExecutionPlan(value.executionPlan);
+  return {
+    discoveryText: JSON.stringify({
+      workItems: value.workItems,
+      acceptanceCriteria: value.acceptanceCriteria,
+    }),
+    executionPlan: previousPlan === undefined
+      ? executionPlan
+      : validatePlanTransition(previousPlan, executionPlan),
+  };
+}
+
+export interface AggregatePlanInput {
+  readonly threadId: string;
+  readonly objective: string;
+  readonly discovery: DiscoveryResult;
+  readonly findings: readonly Finding[];
+}
+
+export function aggregateExecutionPlan(input: AggregatePlanInput): ExecutionPlan {
+  const files = input.findings
+    .flatMap((finding) => finding.evidence)
+    .filter((evidence) => evidence.kind === "file")
+    .map((evidence) => evidence.location);
+  const risks = input.findings.flatMap((finding) => finding.risks);
+  return {
+    version: 1,
+    planId: `plan-${input.threadId}`.slice(0, 128),
+    revision: 1,
+    changes: [{
+      changeId: "aggregate",
+      title: "Aggregate implementation",
+      instruction: input.objective,
+      dependsOn: [],
+      scope: { files: files.length === 0 ? ["."] : [...new Set(files)] },
+      risk: { level: risks.length === 0 ? "low" : "high", reasons: [...new Set(risks)] },
+      acceptanceChecks: [{ kind: "package_script", script: "test" }],
+      status: "pending",
+    }],
+  };
+}
+
+export function isAggregatePlan(plan: ExecutionPlan): boolean {
+  return plan.changes.length === 1 && plan.changes[0]?.changeId === "aggregate" &&
+    plan.changes[0].title === "Aggregate implementation";
 }
 
 export function parseWorkflowInput(value: unknown): CodingWorkflowInput {

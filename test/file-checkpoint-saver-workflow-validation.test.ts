@@ -151,26 +151,25 @@ test("quarantines phase-incomplete workflow state", async () => {
   }
 });
 
-test("quarantines invalid pending workflow writes without disabling a healthy thread", async () => {
+test("reopens structurally valid partial approval writes while completed checkpoints remain strict", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-langgraph-pending-write-validation-"));
   const directory = join(root, "checkpoints");
-  const invalidThread = "invalid-pending-writes";
+  const partialThread = "partial-approval-writes";
   const healthyThread = "healthy-pending-write-neighbor";
 
   try {
     const saver = await FileCheckpointSaver.open(directory);
-    const invalidConfig = await saver.put(
-      { configurable: { thread_id: invalidThread } },
+    const partialConfig = await saver.put(
+      { configurable: { thread_id: partialThread } },
       checkpoint("checkpoint-invalid-pending", validWorkflowState()),
       { source: "input", step: -1, parents: {} },
       {},
     );
     await saver.putWrites(
-      invalidConfig,
+      partialConfig,
       [
-        ["phase", "discovered"],
-        ["workItems", []],
-        ["acceptanceCriteria", []],
+        ["status", "awaiting_approval"],
+        ["interrupt", null],
       ],
       "evil-task",
     );
@@ -182,11 +181,9 @@ test("quarantines invalid pending workflow writes without disabling a healthy th
     );
 
     const reopened = await FileCheckpointSaver.open(directory);
-    await expect(reopened.getTuple({ configurable: { thread_id: invalidThread } })).rejects.toThrow(
-      "checkpoint is corrupt",
-    );
+    expect(await reopened.getTuple({ configurable: { thread_id: partialThread } })).toBeDefined();
     expect(await reopened.getTuple({ configurable: { thread_id: healthyThread } })).toBeDefined();
-    expect(reopened.quarantinedFiles).toHaveLength(1);
+    expect(reopened.quarantinedFiles).toHaveLength(0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

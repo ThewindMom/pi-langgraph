@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { InvalidWorkflowError, compileWorkflow, parseWorkflowInput } from "../src/workflow/compiler.ts";
+import { InvalidWorkflowError, compileWorkflow, decodeDiscoveryEnvelope, parseWorkflowInput } from "../src/workflow/compiler.ts";
 import { parseSynthesis } from "../src/workflow/parsers.ts";
 import { runCodingWorkflow } from "../src/workflow/runtime.ts";
 import type { TaskExecutor } from "../src/types.ts";
@@ -8,6 +8,50 @@ describe("safe semantic workflow compiler", () => {
   test("accepts a detailed bounded synthesis returned by a real coding worker", () => {
     const summary = "evidence ".repeat(1_500).trim();
     expect(parseSynthesis(JSON.stringify({ summary }))).toBe(summary);
+  });
+
+  test("accepts one schema-valid object wrapped by host-mandated worker status text", () => {
+    const output = 'I detect an evidence synthesis task.\n```json\n{"summary":"Parallel specialists found one strength and one risk."}\n```\nCompleted.';
+    expect(parseSynthesis(output)).toBe("Parallel specialists found one strength and one risk.");
+    expect(() => parseSynthesis('{"summary":"first"} {"summary":"second"}')).toThrow(
+      "synthesis must be one JSON object",
+    );
+    expect(parseSynthesis('status {not-json}\n{"summary":"brace } and \\"quote\\" survive"} done')).toBe(
+      'brace } and "quote" survive',
+    );
+    expect(() => parseSynthesis('status {"unfinished":true\n{"summary":"hidden"}')).toThrow(
+      "synthesis must be one JSON object",
+    );
+    expect(() => parseSynthesis('{"summary":"valid","nested":{"unexpected":true}}')).toThrow(
+      'unsupported field "nested"',
+    );
+  });
+
+  test("decodes a typed execution plan wrapped by Pi lifecycle prose", () => {
+    const envelope = decodeDiscoveryEnvelope(`Discovery complete.\n${JSON.stringify({
+      workItems: [{ id: "catalog", title: "Catalog", instruction: "Inspect catalog" }],
+      acceptanceCriteria: ["tests pass"],
+      executionPlan: {
+        version: 1,
+        planId: "wrapped-plan",
+        revision: 1,
+        changes: [{
+          changeId: "catalog",
+          title: "Catalog",
+          instruction: "Update catalog",
+          dependsOn: [],
+          scope: { files: ["src/catalog.js"] },
+          risk: { level: "low", reasons: [] },
+          acceptanceChecks: [{ kind: "package_script", script: "test" }],
+          status: "pending",
+        }],
+      },
+    })}\nDone.`);
+    expect(envelope.executionPlan?.planId).toBe("wrapped-plan");
+    expect(JSON.parse(envelope.discoveryText)).toEqual({
+      workItems: [{ id: "catalog", title: "Catalog", instruction: "Inspect catalog" }],
+      acceptanceCriteria: ["tests pass"],
+    });
   });
 
   test("accepts evidence synthesis sized for the maximum bounded fan-out", () => {
@@ -72,7 +116,7 @@ describe("safe semantic workflow compiler", () => {
         { threadId: "invalid-discovery", retainCheckpoint: true },
       ),
     ).rejects.toThrow("duplicate work item");
-    expect(calls).toEqual(["discover", "discover"]);
+    expect(calls).toEqual(["discover", "discover_format_repair", "discover", "discover_format_repair"]);
   });
 
   test("invalid bounds execute no workers", async () => {

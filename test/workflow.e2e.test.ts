@@ -66,7 +66,26 @@ test("compiles a normal full-stack objective into parallel analysis and evidence
   const result = await runCodingWorkflow(
     { objective: "Implement the React settings screen and its API across the full stack" },
     executor,
-    { threadId: "happy-full-stack", retainCheckpoint: true },
+    {
+      threadId: "happy-full-stack",
+      retainCheckpoint: true,
+      evidenceRunner: {
+        async defaultIntegrationScripts() { return ["test"]; },
+        async runPackageScript(script) {
+          const artifact = { digest: "a".repeat(64), byteCount: 0, truncated: false };
+          return {
+            script,
+            packageManager: "bun",
+            exitCode: 0,
+            signal: null,
+            durationMs: 1,
+            stdout: artifact,
+            stderr: artifact,
+            passed: true,
+          };
+        },
+      },
+    },
   );
 
   expect(peakSpecialists).toBe(2);
@@ -74,7 +93,9 @@ test("compiles a normal full-stack objective into parallel analysis and evidence
   expect(result.status).toBe("completed");
   expect(result.findings.map((finding) => finding.workItemId).sort()).toEqual(["backend", "frontend"]);
   expect(result.verification?.passed).toBe(true);
-  expect(result.verification?.checks).toHaveLength(2);
+  expect(result.verification?.checks).toEqual([
+    expect.objectContaining({ name: "package:test", passed: true }),
+  ]);
   expect(result.summary).toBe("Shipped and verified.");
   expect(result.trace.map((event) => event.node)).toEqual([
     "classify",

@@ -27,7 +27,7 @@
   },
   "scripts": {
     "test": "bun test",
-    "check": "tsc --noEmit && bun build ./src/index.ts --outdir ./dist --target bun --external @earendil-works/pi-coding-agent"
+    "check": "tsc --noEmit && bun build ./src/index.ts --outdir ./dist --target bun --external @earendil-works/pi-coding-agent && bun build ./src/index.ts --outfile ./dist/index.node.js --target node --external @earendil-works/pi-coding-agent"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.80.10",

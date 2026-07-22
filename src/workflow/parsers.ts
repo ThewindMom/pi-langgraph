@@ -10,6 +10,9 @@ import {
   type WorkItem,
 } from "./types.ts";
 
+export { parseExecutionPlan, validateExecutionPlan, InvalidExecutionPlanError } from "./execution-plan.ts";
+export type { ExecutionPlan, PackageScriptCheck, PlanChange, PlanChangeStatus, PlanRisk, PlanScope } from "./types.ts";
+
 const WORK_ITEM_ID = /^[A-Za-z][A-Za-z0-9_-]{0,47}$/;
 const MAX_TEXT = 8_000;
 const MAX_SYNTHESIS_TEXT = 32_000;
@@ -21,7 +24,7 @@ export class InvalidWorkerOutputError extends Error {
 }
 
 export function parseDiscovery(text: string): DiscoveryResult {
-  const value = parseObject(text, "discovery");
+  const value = parseWorkerObject(text, "discovery");
   exactFields(value, ["workItems", "acceptanceCriteria"], "discovery");
   const rawItems = array(value.workItems, "workItems", 1, MAX_WORK_ITEMS);
   const seen = new Set<string>();
@@ -33,7 +36,7 @@ export function parseDiscovery(text: string): DiscoveryResult {
 }
 
 export function parseFinding(text: string, workItemId: string): Finding {
-  const value = parseObject(text, "specialist finding");
+  const value = parseWorkerObject(text, "specialist finding");
   exactFields(value, ["summary", "evidence", "risks", "discoveredWorkItems"], "specialist finding");
   const rawEvidence = array(value.evidence, "evidence", 0, MAX_LIST);
   const evidence: FindingEvidence[] = rawEvidence.map((item, index) => {
@@ -64,7 +67,7 @@ export function parseFinding(text: string, workItemId: string): Finding {
 }
 
 export function parseChangeSet(text: string, kind: ChangeSet["kind"]): ChangeSet {
-  const value = parseObject(text, `${kind} change set`);
+  const value = parseWorkerObject(text, `${kind} change set`);
   exactFields(value, ["summary", "filesChanged", "evidence", "unresolvedRisks"], `${kind} change set`);
   return {
     kind,
@@ -76,7 +79,7 @@ export function parseChangeSet(text: string, kind: ChangeSet["kind"]): ChangeSet
 }
 
 export function parseVerification(text: string): VerificationResult {
-  const value = parseObject(text, "verification");
+  const value = parseWorkerObject(text, "verification");
   exactFields(value, ["passed", "summary", "checks"], "verification");
   if (typeof value.passed !== "boolean") throw new InvalidWorkerOutputError("verification.passed must be boolean");
   const rawChecks = array(value.checks, "checks", 1, MAX_LIST);
@@ -104,7 +107,7 @@ export function parseVerification(text: string): VerificationResult {
 }
 
 export function parseDiagnostic(text: string): DiagnosticResult {
-  const value = parseObject(text, "diagnostic");
+  const value = parseWorkerObject(text, "diagnostic");
   exactFields(value, ["summary", "rootCauses", "repairInstructions"], "diagnostic");
   return {
     summary: textValue(value.summary, "summary", MAX_TEXT),
@@ -114,12 +117,12 @@ export function parseDiagnostic(text: string): DiagnosticResult {
 }
 
 export function parseSynthesis(text: string): string {
-  const value = parseObject(text, "synthesis");
+  const value = parseWorkerObject(text, "synthesis");
   exactFields(value, ["summary"], "synthesis");
   return textValue(value.summary, "summary", MAX_SYNTHESIS_TEXT);
 }
 
-function parseObject(text: string, label: string): Readonly<Record<string, unknown>> {
+export function parseWorkerObject(text: string, label: string): Readonly<Record<string, unknown>> {
   if (text.length > MAX_WORKER_OUTPUT) {
     throw new InvalidWorkerOutputError(`worker output exceeds ${MAX_WORKER_OUTPUT} characters`);
   }
@@ -130,9 +133,45 @@ function parseObject(text: string, label: string): Readonly<Record<string, unkno
   try {
     value = JSON.parse(candidate);
   } catch {
-    throw new InvalidWorkerOutputError(`${label} must be one JSON object`);
+    value = embeddedObject(trimmed, label);
   }
   return recordValue(value, label);
+}
+
+function embeddedObject(text: string, label: string): unknown {
+  const parsed: unknown[] = [];
+  let start = -1;
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (start < 0) {
+      if (character === "{") {
+        start = index;
+        depth = 1;
+      }
+      continue;
+    }
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') quoted = false;
+      continue;
+    }
+    if (character === '"') quoted = true;
+    else if (character === "{") depth += 1;
+    else if (character === "}") depth -= 1;
+    if (depth !== 0) continue;
+    try {
+      parsed.push(JSON.parse(text.slice(start, index + 1)));
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+    }
+    start = -1;
+  }
+  if (parsed.length !== 1) throw new InvalidWorkerOutputError(`${label} must be one JSON object`);
+  return parsed[0];
 }
 
 function exactFields(value: Readonly<Record<string, unknown>>, allowed: readonly string[], label: string): void {

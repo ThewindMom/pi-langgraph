@@ -1,15 +1,19 @@
 import { Annotation } from "@langchain/langgraph";
 import type {
+  ChangeResult,
   ChangeSet,
   CompiledWorkflow,
   DiagnosticResult,
+  ExecutionPlan,
   Finding,
+  ScopedInterrupt,
   VerificationResult,
   WorkflowPhase,
   WorkflowStatus,
   WorkflowTraceEvent,
   WorkItem,
 } from "./types.ts";
+import type { ArtifactRef } from "../evidence/types.ts";
 
 const FindingsChannel = Annotation<readonly Finding[]>({
   default: () => [],
@@ -42,6 +46,16 @@ export const WorkflowState = Annotation.Root({
     reducer: (current, update) => [...current, ...update],
   }),
   trace: TraceChannel,
+  plan: Annotation<ExecutionPlan | undefined>,
+  changeResults: Annotation<readonly ChangeResult[]>({
+    default: () => [],
+    reducer: (current, update) => [...current, ...update],
+  }),
+  evidenceRefs: Annotation<readonly ArtifactRef[]>({
+    default: () => [],
+    reducer: (current, update) => [...current, ...update],
+  }),
+  interrupt: Annotation<ScopedInterrupt | undefined>,
 });
 
 export type WorkflowStateValue = typeof WorkflowState.State;

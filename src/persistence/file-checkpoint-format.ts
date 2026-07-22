@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { SerializedMutationEntry } from "./mutation-journal.ts";
 
 export const FILE_SUFFIX = ".checkpoint.json";
-export const FILE_VERSION = 2;
+export const FILE_VERSION = 3;
 export const MAX_CHECKPOINT_FILE_BYTES = 8 * 1024 * 1024;
 export const MAX_NAMESPACES = 64;
 export const MAX_CHECKPOINTS_PER_NAMESPACE = 256;
@@ -33,7 +33,7 @@ export interface SerializedThread {
 }
 
 export interface ParsedSerializedThread extends SerializedThread {
-  readonly sourceVersion: 1 | typeof FILE_VERSION;
+  readonly sourceVersion: 1 | 2 | typeof FILE_VERSION;
 }
 
 export function parseSerializedThread(raw: string, path: string): ParsedSerializedThread {
@@ -43,7 +43,11 @@ export function parseSerializedThread(raw: string, path: string): ParsedSerializ
   } catch {
     throw new Error(`invalid checkpoint JSON: ${path}`);
   }
-  if (!isRecord(value) || (value.version !== 1 && value.version !== FILE_VERSION) || typeof value.threadId !== "string") {
+  if (
+    !isRecord(value) ||
+    (value.version !== 1 && value.version !== 2 && value.version !== FILE_VERSION) ||
+    typeof value.threadId !== "string"
+  ) {
     throw new Error(`unsupported checkpoint file: ${path}`);
   }
   const fields = value.version === 1
@@ -62,7 +66,7 @@ export function parseSerializedThread(raw: string, path: string): ParsedSerializ
 function parseMutations(value: unknown, path: string): Readonly<Record<string, SerializedMutationEntry>> {
   const result: Record<string, SerializedMutationEntry> = Object.create(null);
   for (const [key, entry] of boundedEntries(value, "mutation journal", 64, path)) {
-    if (!/^(implement|repair):(?:0|[1-9]\d*)$/.test(key) || !isRecord(entry)) {
+    if (!isMutationKey(key) || !isRecord(entry)) {
       throw new Error(`invalid mutation journal entry: ${path}`);
     }
     if (entry.status === "started" && hasOnlyFields(entry, ["status"])) {
@@ -79,6 +83,15 @@ function parseMutations(value: unknown, path: string): Readonly<Record<string, S
     }
   }
   return result;
+}
+
+function isMutationKey(value: string): boolean {
+  if (value.length > 96) return false;
+  if (!/^(?:(?:implement|repair)|v3:[a-f0-9]{64}:(?:implement|repair)):(?:0|[1-9]\d*)$/.test(value)) {
+    return false;
+  }
+  const attempt = Number(value.slice(value.lastIndexOf(":") + 1));
+  return Number.isSafeInteger(attempt);
 }
 
 function parseStorage(
