@@ -81,16 +81,30 @@ export class FileCheckpointSaver extends BaseCheckpointSaver {
 
   async put(config: RunnableConfig, checkpoint: Checkpoint, metadata: CheckpointMetadata, _newVersions: ChannelVersions): Promise<RunnableConfig> {
     return this.enqueue(async () => {
-      const result = await this.memory.put(config, checkpoint, metadata);
-      await this.persistThread(requiredThreadId(result));
-      return result;
+      const threadId = requiredThreadId(config);
+      const snapshot = snapshotThread(this.memory, threadId);
+      try {
+        const result = await this.memory.put(config, checkpoint, metadata);
+        await this.persistThread(threadId);
+        return result;
+      } catch (error) {
+        restoreThread(this.memory, threadId, snapshot);
+        throw error;
+      }
     });
   }
 
   async putWrites(config: RunnableConfig, writes: PendingWrite[], taskId: string): Promise<void> {
     return this.enqueue(async () => {
-      await this.memory.putWrites(config, writes, taskId);
-      await this.persistThread(requiredThreadId(config));
+      const threadId = requiredThreadId(config);
+      const snapshot = snapshotThread(this.memory, threadId);
+      try {
+        await this.memory.putWrites(config, writes, taskId);
+        await this.persistThread(threadId);
+      } catch (error) {
+        restoreThread(this.memory, threadId, snapshot);
+        throw error;
+      }
     });
   }
 
@@ -195,4 +209,35 @@ function requiredThreadId(config: RunnableConfig): string {
   if (typeof value !== "string") throw new Error("checkpoint config requires a string thread_id");
   validateThreadId(value);
   return value;
+}
+
+interface ThreadSnapshot {
+  readonly storage?: MemorySaver["storage"][string];
+  readonly writes: ReadonlyArray<readonly [string, MemorySaver["writes"][string]]>;
+}
+
+function snapshotThread(memory: MemorySaver, threadId: string): ThreadSnapshot {
+  const currentStorage = memory.storage[threadId];
+  const storage =
+    currentStorage === undefined
+      ? undefined
+      : Object.fromEntries(
+          Object.entries(currentStorage).map(([namespace, checkpoints]) => [
+            namespace,
+            Object.assign(Object.create(null), checkpoints),
+          ]),
+        );
+  const writes = Object.entries(memory.writes)
+    .filter(([key]) => parseWriteBucketKey(key).threadId === threadId)
+    .map(([key, bucket]) => [key, Object.assign(Object.create(null), bucket)] as const);
+  return { ...(storage === undefined ? {} : { storage }), writes };
+}
+
+function restoreThread(memory: MemorySaver, threadId: string, snapshot: ThreadSnapshot): void {
+  if (snapshot.storage === undefined) delete memory.storage[threadId];
+  else memory.storage[threadId] = snapshot.storage;
+  for (const key of Object.keys(memory.writes)) {
+    if (parseWriteBucketKey(key).threadId === threadId) delete memory.writes[key];
+  }
+  for (const [key, writes] of snapshot.writes) memory.writes[key] = writes;
 }

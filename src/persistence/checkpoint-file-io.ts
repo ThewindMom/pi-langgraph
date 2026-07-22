@@ -1,4 +1,4 @@
-import { chmod, open, rename, unlink } from "node:fs/promises";
+import { open, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { MAX_CHECKPOINT_FILE_BYTES, isRecord } from "./file-checkpoint-format.ts";
@@ -28,16 +28,17 @@ export async function readBoundedFile(path: string): Promise<string> {
 }
 
 export async function atomicWrite(directory: string, destination: string, contents: string): Promise<void> {
+  assertCheckpointFileSize(contents);
   const temporary = join(directory, `.${randomUUID()}.tmp`);
   const handle = await open(temporary, "wx", 0o600);
   try {
-    await handle.writeFile(contents, "utf8");
-  } finally {
-    await handle.close();
-  }
-  try {
+    try {
+      await handle.writeFile(contents, "utf8");
+      await handle.chmod(0o600);
+    } finally {
+      await handle.close();
+    }
     await rename(temporary, destination);
-    await chmod(destination, 0o600);
   } catch (error) {
     try {
       await unlink(temporary);
@@ -45,6 +46,13 @@ export async function atomicWrite(directory: string, destination: string, conten
       if (!isNodeErrorCode(cleanupError, "ENOENT")) throw cleanupError;
     }
     throw error;
+  }
+}
+
+export function assertCheckpointFileSize(contents: string): void {
+  const bytes = Buffer.byteLength(contents, "utf8");
+  if (bytes > MAX_CHECKPOINT_FILE_BYTES) {
+    throw new Error(`checkpoint thread exceeds ${MAX_CHECKPOINT_FILE_BYTES} bytes: received ${bytes}`);
   }
 }
 

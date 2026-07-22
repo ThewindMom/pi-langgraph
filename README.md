@@ -114,7 +114,9 @@ Checkpoints live under the Pi agent directory:
 
 The included saver delegates checkpoint and pending-write semantics to the version-matched LangGraph `MemorySaver`, then atomically persists its representation in per-thread files. Directories use mode `0700` and files `0600` on POSIX. Successful terminal checkpoints are deleted after the sanitized result is materialized; failed, interrupted, `needs_attention`, and approval-paused threads remain resumable. A malformed file is quarantined instead of disabling healthy threads; resuming the affected thread reports the corruption explicitly.
 
-This design is intentionally local and single-process. Same-thread invocations are serialized for their full run. It does not claim protection from the same OS user, root, malware, backups, or forensic recovery.
+Each per-thread file has an 8 MiB aggregate admission limit. A candidate that exceeds it is rejected before disk replacement, and the saver restores its previous in-memory thread state, so the last accepted checkpoint remains readable and resumable. This is a fail-closed capacity boundary, not history compaction.
+
+This design is intentionally local and single-process. Same-thread invocations are serialized for their full run. It does not claim protection from the same OS user, root, malware, backups, forensic recovery, or exactly-once external filesystem effects when a worker process dies after mutation but before returning its result; mutation executors must eventually provide durable idempotency and reconciliation for that crash window.
 
 Why not the official SQLite saver? Its current JavaScript package uses `better-sqlite3`, which does not load in the Bun runtime used by Pi/Senpi. A Postgres service would be disproportionate for a local extension.
 
