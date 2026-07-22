@@ -27,6 +27,7 @@ export function validatePersistedWorkflowChannels(value: unknown): void {
   const changes = items(state.changes, "changes", 6, validateChange); for (const [index, changeValue] of changes.entries()) { const change = record(changeValue, `changes[${index}]`); if (change.kind !== (index === 0 ? "implementation" : "repair")) invalid(`changes[${index}].kind`); }
   const verificationPassed = optional(state.verification, validateVerification); optional(state.diagnostic, validateDiagnostic); optional(state.currentWorkItem, (item) => validateWorkItem(item, "currentWorkItem"));
   const iteration = integer(state.iteration, "iteration", 0, 5); if (iteration > maxIterations || Math.max(0, changes.length - 1) !== iteration) invalid("iteration");
+  if (phase === "diagnosed" && iteration >= maxIterations) invalid("diagnosed iteration");
   if (typeof state.status !== "string" || !STATUSES.has(state.status)) invalid("status"); const status = state.status;
   text(state.summary, "summary", 32_000, true); strings(state.unresolvedRisks, "unresolvedRisks", 256, 4_000); items(state.trace, "trace", 128, validateTrace);
   if (pattern === "review" && (maxIterations !== 0 || changes.length !== 0 || state.verification !== undefined)) invalid("review state");

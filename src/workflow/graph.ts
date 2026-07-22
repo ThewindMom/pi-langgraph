@@ -1,6 +1,11 @@
 import { END, START, StateGraph } from "@langchain/langgraph";
 import type { BaseCheckpointSaver } from "@langchain/langgraph-checkpoint";
 import type { ExecutionRequest, OrchestrationTask } from "../types.ts";
+import type {
+  MutationExecution,
+  MutationJournal,
+  MutationOperation,
+} from "../persistence/mutation-journal.ts";
 import { classifyNode, collectNode, dispatchNode, escalateNode, routeDispatch } from "./routing-nodes.ts";
 import type { WorkflowRuntimeDependencies } from "./types.ts";
 import {
@@ -21,6 +26,8 @@ const DEFAULT_NODE_TIMEOUT_MS = 10 * 60 * 1_000;
 
 export interface CompileCodingGraphOptions {
   readonly checkpointer: BaseCheckpointSaver;
+  readonly mutationJournal: MutationJournal;
+  readonly threadId: string;
   readonly interruptBeforeMutation?: boolean;
 }
 
@@ -71,6 +78,19 @@ export function compileCodingGraph(
     }
   };
 
+  const executeMutation = async (
+    task: OrchestrationTask,
+    objective: string,
+    operation: MutationOperation,
+  ): Promise<MutationExecution> => {
+    const claim = await options.mutationJournal.claimMutation(options.threadId, operation);
+    if (claim.status === "indeterminate") return claim;
+    if (claim.status === "replay") return { status: "completed", output: claim.output };
+    const output = await execute(task, objective);
+    await options.mutationJournal.completeMutation(options.threadId, operation, output);
+    return { status: "completed", output };
+  };
+
   const specialistSubgraph = new StateGraph({ stateSchema: SpecialistState, output: SpecialistOutput })
     .addNode("analyze", createSpecialistNode(execute), { retryPolicy, timeout: nodeTimeout })
     .addEdge(START, "analyze")
@@ -83,14 +103,14 @@ export function compileCodingGraph(
     .addNode("specialist", specialistSubgraph, { input: SpecialistState })
     .addNode("dispatch", dispatchNode)
     .addNode("collect", collectNode)
-    .addNode("implement", createImplementNode(execute), { timeout: nodeTimeout })
+    .addNode("implement", createImplementNode(executeMutation), { timeout: nodeTimeout })
     .addNode(
       "verify",
       createVerifyNode(execute),
       { retryPolicy, timeout: nodeTimeout, ends: ["synthesize", "diagnose", "escalate"] },
     )
     .addNode("diagnose", createDiagnoseNode(execute), { retryPolicy, timeout: nodeTimeout })
-    .addNode("repair", createRepairNode(execute), { timeout: nodeTimeout })
+    .addNode("repair", createRepairNode(executeMutation), { timeout: nodeTimeout })
     .addNode("synthesize", createSynthesizeNode(execute), { retryPolicy, timeout: nodeTimeout })
     .addNode("escalate", escalateNode)
     .addEdge(START, "classify")

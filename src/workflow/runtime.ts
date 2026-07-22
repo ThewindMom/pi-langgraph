@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { MemorySaver, type BaseCheckpointSaver } from "@langchain/langgraph-checkpoint";
 import type { TaskExecutor } from "../types.ts";
+import { deleteMutationJournalThread, mutationJournalFor } from "../persistence/mutation-journal.ts";
 import { compileWorkflow } from "./compiler.ts";
 import { compileCodingGraph } from "./graph.ts";
 import {
@@ -36,7 +37,12 @@ export async function runCodingWorkflow(
         ...(options.signal === undefined ? {} : { signal: options.signal }),
         ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
       },
-      { checkpointer, interruptBeforeMutation: approvalRequired },
+      {
+        checkpointer,
+        mutationJournal: mutationJournalFor(checkpointer),
+        threadId,
+        interruptBeforeMutation: approvalRequired,
+      },
     );
     const state = await graph.invoke(
       {
@@ -59,7 +65,10 @@ export async function runCodingWorkflow(
       invocationConfig(threadId, compiled.recursionLimit, options.signal),
     );
     const result = projectResult(threadId, state);
-    if (result.status === "completed" && options.retainCheckpoint !== true) await checkpointer.deleteThread(threadId);
+    if (result.status === "completed" && options.retainCheckpoint !== true) {
+      await checkpointer.deleteThread(threadId);
+      await deleteMutationJournalThread(checkpointer, threadId);
+    }
     return result;
   });
 }
@@ -87,11 +96,19 @@ export async function resumeCodingWorkflow(
         ...(options.signal === undefined ? {} : { signal: options.signal }),
         ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
       },
-      { checkpointer, interruptBeforeMutation: false },
+      {
+        checkpointer,
+        mutationJournal: mutationJournalFor(checkpointer),
+        threadId,
+        interruptBeforeMutation: false,
+      },
     );
     const state = await graph.invoke(null, invocationConfig(threadId, saved.recursionLimit, options.signal));
     const result = projectResult(threadId, state);
-    if (result.status === "completed" && options.retainCheckpoint !== true) await checkpointer.deleteThread(threadId);
+    if (result.status === "completed" && options.retainCheckpoint !== true) {
+      await checkpointer.deleteThread(threadId);
+      await deleteMutationJournalThread(checkpointer, threadId);
+    }
     return result;
   });
 }

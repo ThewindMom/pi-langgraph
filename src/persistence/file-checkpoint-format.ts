@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
+import type { SerializedMutationEntry } from "./mutation-journal.ts";
 
 export const FILE_SUFFIX = ".checkpoint.json";
-export const FILE_VERSION = 1;
+export const FILE_VERSION = 2;
 export const MAX_CHECKPOINT_FILE_BYTES = 8 * 1024 * 1024;
 export const MAX_NAMESPACES = 64;
 export const MAX_CHECKPOINTS_PER_NAMESPACE = 256;
@@ -28,25 +29,56 @@ export interface SerializedThread {
   readonly threadId: string;
   readonly storage: Readonly<Record<string, Readonly<Record<string, SerializedCheckpointEntry>>>>;
   readonly writes: Readonly<Record<string, readonly SerializedWriteEntry[]>>;
+  readonly mutations: Readonly<Record<string, SerializedMutationEntry>>;
 }
 
-export function parseSerializedThread(raw: string, path: string): SerializedThread {
+export interface ParsedSerializedThread extends SerializedThread {
+  readonly sourceVersion: 1 | typeof FILE_VERSION;
+}
+
+export function parseSerializedThread(raw: string, path: string): ParsedSerializedThread {
   let value: unknown;
   try {
     value = JSON.parse(raw);
   } catch {
     throw new Error(`invalid checkpoint JSON: ${path}`);
   }
-  if (!isRecord(value) || value.version !== FILE_VERSION || typeof value.threadId !== "string") {
+  if (!isRecord(value) || (value.version !== 1 && value.version !== FILE_VERSION) || typeof value.threadId !== "string") {
     throw new Error(`unsupported checkpoint file: ${path}`);
   }
-  if (!hasOnlyFields(value, ["version", "threadId", "storage", "writes"])) {
+  const fields = value.version === 1
+    ? ["version", "threadId", "storage", "writes"]
+    : ["version", "threadId", "storage", "writes", "mutations"];
+  if (!hasOnlyFields(value, fields)) {
     throw new Error(`unsupported checkpoint fields: ${path}`);
   }
   validateThreadId(value.threadId);
   const storage = parseStorage(value.storage, path);
   const writes = parseWrites(value.writes, path);
-  return { version: FILE_VERSION, threadId: value.threadId, storage, writes };
+  const mutations = value.version === 1 ? Object.create(null) : parseMutations(value.mutations, path);
+  return { version: FILE_VERSION, sourceVersion: value.version, threadId: value.threadId, storage, writes, mutations };
+}
+
+function parseMutations(value: unknown, path: string): Readonly<Record<string, SerializedMutationEntry>> {
+  const result: Record<string, SerializedMutationEntry> = Object.create(null);
+  for (const [key, entry] of boundedEntries(value, "mutation journal", 64, path)) {
+    if (!/^(implement|repair):(?:0|[1-9]\d*)$/.test(key) || !isRecord(entry)) {
+      throw new Error(`invalid mutation journal entry: ${path}`);
+    }
+    if (entry.status === "started" && hasOnlyFields(entry, ["status"])) {
+      result[key] = { status: "started" };
+    } else if (
+      entry.status === "completed" &&
+      hasOnlyFields(entry, ["status", "output"]) &&
+      typeof entry.output === "string" &&
+      entry.output.length <= MAX_CHECKPOINT_FILE_BYTES
+    ) {
+      result[key] = { status: "completed", output: entry.output };
+    } else {
+      throw new Error(`invalid mutation journal entry: ${path}`);
+    }
+  }
+  return result;
 }
 
 function parseStorage(

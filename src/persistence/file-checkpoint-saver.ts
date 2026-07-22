@@ -28,12 +28,24 @@ import {
 } from "./file-checkpoint-format.ts";
 import { validateCheckpoint, validateCheckpointMetadata } from "./file-checkpoint-validation.ts";
 import { atomicWrite, isNodeErrorCode, readBoundedFile } from "./checkpoint-file-io.ts";
+import { requiredThreadId } from "./checkpoint-config.ts";
+import { restoreThread, snapshotThread } from "./checkpoint-memory-snapshot.ts";
+import { migrateLegacyMutationJournal } from "./legacy-mutation-migration.ts";
+import {
+  claimFromEntry,
+  mutationKey,
+  type MutationClaim,
+  type MutationJournal,
+  type MutationOperation,
+  type SerializedMutationEntry,
+} from "./mutation-journal.ts";
 
-export class FileCheckpointSaver extends BaseCheckpointSaver {
+export class FileCheckpointSaver extends BaseCheckpointSaver implements MutationJournal {
   readonly rootDirectory: string;
   readonly memory: MemorySaver;
   readonly quarantinedFiles: Array<{ readonly fileName: string; readonly error: string }> = [];
   private readonly corruptFiles = new Map<string, { readonly quarantineName: string; readonly error: string }>();
+  private readonly mutations = new Map<string, Record<string, SerializedMutationEntry>>();
   private pending: Promise<void> = Promise.resolve();
 
   private constructor(rootDirectory: string) {
@@ -112,6 +124,7 @@ export class FileCheckpointSaver extends BaseCheckpointSaver {
     return this.enqueue(async () => {
       validateThreadId(threadId);
       await this.memory.deleteThread(threadId);
+      this.mutations.delete(threadId);
       const corrupt = this.corruptFiles.get(fileNameForThread(threadId));
       if (corrupt !== undefined) {
         await unlink(join(this.rootDirectory, corrupt.quarantineName));
@@ -121,6 +134,42 @@ export class FileCheckpointSaver extends BaseCheckpointSaver {
         await unlink(this.pathForThread(threadId));
       } catch (error) {
         if (!isNodeErrorCode(error, "ENOENT")) throw error;
+      }
+    });
+  }
+
+  async claimMutation(threadId: string, operation: MutationOperation): Promise<MutationClaim> {
+    return this.enqueue(async () => {
+      validateThreadId(threadId);
+      const entries = this.mutations.get(threadId) ?? Object.create(null);
+      const key = mutationKey(operation);
+      const claim = claimFromEntry(entries[key]);
+      if (claim.status !== "execute") return claim;
+      entries[key] = { status: "started" };
+      this.mutations.set(threadId, entries);
+      try {
+        await this.persistThread(threadId);
+      } catch (error) {
+        delete entries[key];
+        if (Object.keys(entries).length === 0) this.mutations.delete(threadId);
+        throw error;
+      }
+      return claim;
+    });
+  }
+
+  async completeMutation(threadId: string, operation: MutationOperation, output: string): Promise<void> {
+    return this.enqueue(async () => {
+      validateThreadId(threadId);
+      const entries = this.mutations.get(threadId);
+      const key = mutationKey(operation);
+      if (entries?.[key]?.status !== "started") throw new Error(`mutation ${key} has no active claim`);
+      entries[key] = { status: "completed", output };
+      try {
+        await this.persistThread(threadId);
+      } catch (error) {
+        entries[key] = { status: "started" };
+        throw error;
       }
     });
   }
@@ -173,6 +222,10 @@ export class FileCheckpointSaver extends BaseCheckpointSaver {
     }
     this.memory.storage[value.threadId] = namespaces;
     for (const [outerKey, writes] of hydratedWrites) this.memory.writes[outerKey] = writes;
+    const mutations = value.sourceVersion === 1
+      ? migrateLegacyMutationJournal(rootWorkflowStates)
+      : { ...value.mutations };
+    this.mutations.set(value.threadId, mutations);
     await chmod(path, 0o600);
   }
 
@@ -192,7 +245,13 @@ export class FileCheckpointSaver extends BaseCheckpointSaver {
       if (parseWriteBucketKey(outerKey).threadId !== threadId) continue;
       serializedWrites[outerKey] = Object.entries(writes).map(([key, [taskId, channel, value]]) => ({ key, taskId, channel, value: encode(value) }));
     }
-    const data: SerializedThread = { version: FILE_VERSION, threadId, storage: serializedStorage, writes: serializedWrites };
+    const data: SerializedThread = {
+      version: FILE_VERSION,
+      threadId,
+      storage: serializedStorage,
+      writes: serializedWrites,
+      mutations: this.mutations.get(threadId) ?? Object.create(null),
+    };
     await atomicWrite(this.rootDirectory, this.pathForThread(threadId), `${JSON.stringify(data)}\n`);
   }
 
@@ -202,42 +261,4 @@ export class FileCheckpointSaver extends BaseCheckpointSaver {
     const corrupt = this.corruptFiles.get(fileNameForThread(threadId));
     if (corrupt !== undefined) throw new Error(`checkpoint is corrupt for thread ${JSON.stringify(threadId)}: ${corrupt.error}`);
   }
-}
-
-function requiredThreadId(config: RunnableConfig): string {
-  const value = config.configurable?.thread_id;
-  if (typeof value !== "string") throw new Error("checkpoint config requires a string thread_id");
-  validateThreadId(value);
-  return value;
-}
-
-interface ThreadSnapshot {
-  readonly storage?: MemorySaver["storage"][string];
-  readonly writes: ReadonlyArray<readonly [string, MemorySaver["writes"][string]]>;
-}
-
-function snapshotThread(memory: MemorySaver, threadId: string): ThreadSnapshot {
-  const currentStorage = memory.storage[threadId];
-  const storage =
-    currentStorage === undefined
-      ? undefined
-      : Object.fromEntries(
-          Object.entries(currentStorage).map(([namespace, checkpoints]) => [
-            namespace,
-            Object.assign(Object.create(null), checkpoints),
-          ]),
-        );
-  const writes = Object.entries(memory.writes)
-    .filter(([key]) => parseWriteBucketKey(key).threadId === threadId)
-    .map(([key, bucket]) => [key, Object.assign(Object.create(null), bucket)] as const);
-  return { ...(storage === undefined ? {} : { storage }), writes };
-}
-
-function restoreThread(memory: MemorySaver, threadId: string, snapshot: ThreadSnapshot): void {
-  if (snapshot.storage === undefined) delete memory.storage[threadId];
-  else memory.storage[threadId] = snapshot.storage;
-  for (const key of Object.keys(memory.writes)) {
-    if (parseWriteBucketKey(key).threadId === threadId) delete memory.writes[key];
-  }
-  for (const [key, writes] of snapshot.writes) memory.writes[key] = writes;
 }

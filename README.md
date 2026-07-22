@@ -89,7 +89,7 @@ An approval-paused workflow returns `awaiting_approval` with its thread ID. Resu
 }
 ```
 
-The same resume input continues a workflow interrupted by cancellation, provider failure, or process restart. Successful sibling work from a failed dynamic superstep is retained as pending checkpoint writes and is not repeated.
+The same resume input continues a workflow interrupted by cancellation, provider failure, or process restart. Successful sibling work from a failed dynamic superstep is retained as pending checkpoint writes and is not repeated. Implementation and repair nodes additionally use durable operation claims, so a resumed thread never invokes the same logical mutation twice.
 
 ### Results
 
@@ -116,7 +116,11 @@ The included saver delegates checkpoint and pending-write semantics to the versi
 
 Each per-thread file has an 8 MiB aggregate admission limit. A candidate that exceeds it is rejected before disk replacement, and the saver restores its previous in-memory thread state, so the last accepted checkpoint remains readable and resumable. This is a fail-closed capacity boundary, not history compaction.
 
-This design is intentionally local and single-process. Same-thread invocations are serialized for their full run. It does not claim protection from the same OS user, root, malware, backups, forensic recovery, or exactly-once external filesystem effects when a worker process dies after mutation but before returning its result; mutation executors must eventually provide durable idempotency and reconciliation for that crash window.
+Before an implementation or repair worker starts, the saver atomically records a stable operation claim. A returned result is recorded before LangGraph advances. On resume, a completed claim replays its recorded output; a started claim without a result is treated as indeterminate and routed directly to read-only workspace verification. If verification fails, the bounded diagnose/repair loop may authorize a new logical mutation, but the ambiguous operation itself is never invoked again.
+
+This provides at-most-once mutating-worker invocation for sequential owners of the local checkpoint directory, including process restart. It does not claim exactly-once filesystem effects: a process can die after the claim but before any edit, or midway through an edit, so verification remains the source of truth. It also does not provide coordination between concurrently running OS processes, power-loss guarantees beyond the host filesystem, or protection from the same OS user, root, malware, backups, or forensic recovery.
+
+Programmatic custom checkpointers must also implement the mutation claim methods exposed by `FileCheckpointSaver`; a delivery workflow fails before its first mutation when a custom saver cannot uphold this contract. Read-only review workflows remain compatible. Plain `MemorySaver` remains supported for process-local runs only.
 
 Why not the official SQLite saver? Its current JavaScript package uses `better-sqlite3`, which does not load in the Bun runtime used by Pi/Senpi. A Postgres service would be disproportionate for a local extension.
 
@@ -141,7 +145,7 @@ bun test
 bun run check
 ```
 
-The suite covers objective compilation, dynamic fan-out, nested subgraphs, runtime replanning, `Command`-routed repair, bounded escalation, approval interrupts, state history, process-restart resume, pending-write deduplication, durable file permissions, adversarial validation, the registered Pi tool surface, and the legacy DAG.
+The suite covers objective compilation, dynamic fan-out, nested subgraphs, runtime replanning, `Command`-routed repair, bounded escalation, approval interrupts, state history, process-restart resume, mutation replay fencing, pending-write deduplication, durable file permissions, adversarial validation, the registered Pi tool surface, and the legacy DAG.
 
 ## License
 

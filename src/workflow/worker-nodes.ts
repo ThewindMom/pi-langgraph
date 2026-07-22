@@ -1,18 +1,24 @@
 import { Command } from "@langchain/langgraph";
 import type { OrchestrationTask } from "../types.ts";
+import type { MutationExecution, MutationOperation } from "../persistence/mutation-journal.ts";
 import {
   InvalidWorkerOutputError,
-  parseChangeSet,
   parseDiagnostic,
   parseDiscovery,
   parseFinding,
   parseSynthesis,
   parseVerification,
 } from "./parsers.ts";
+import { mutationChange } from "./mutation-reconciliation.ts";
 import { task, workerPrompt } from "./worker-prompts.ts";
 import type { SpecialistStateValue, WorkflowStateValue } from "./workflow-state.ts";
 
 type ExecuteWorker = (task: OrchestrationTask, objective: string) => Promise<string>;
+type ExecuteMutation = (
+  task: OrchestrationTask,
+  objective: string,
+  operation: MutationOperation,
+) => Promise<MutationExecution>;
 
 export function createSpecialistNode(execute: ExecuteWorker) {
   return async (state: SpecialistStateValue) => {
@@ -66,9 +72,9 @@ export function createDiscoverNode(execute: ExecuteWorker) {
   };
 }
 
-export function createImplementNode(execute: ExecuteWorker) {
+export function createImplementNode(execute: ExecuteMutation) {
   return async (state: WorkflowStateValue) => {
-    const output = await execute(
+    const execution = await execute(
       task(
         "implement",
         workerPrompt("implementation", state.objective, {
@@ -85,8 +91,9 @@ export function createImplementNode(execute: ExecuteWorker) {
         }),
       ),
       state.objective,
+      { kind: "implement", iteration: 0 },
     );
-    const change = parseChangeSet(output, "implementation");
+    const change = mutationChange(execution, "implementation", 0);
     return {
       changes: [change],
       unresolvedRisks: change.unresolvedRisks,
@@ -158,9 +165,10 @@ export function createDiagnoseNode(execute: ExecuteWorker) {
   };
 }
 
-export function createRepairNode(execute: ExecuteWorker) {
+export function createRepairNode(execute: ExecuteMutation) {
   return async (state: WorkflowStateValue) => {
-    const output = await execute(
+    const iteration = state.iteration + 1;
+    const execution = await execute(
       task(
         "repair",
         workerPrompt("repair", state.objective, {
@@ -176,9 +184,9 @@ export function createRepairNode(execute: ExecuteWorker) {
         }),
       ),
       state.objective,
+      { kind: "repair", iteration },
     );
-    const change = parseChangeSet(output, "repair");
-    const iteration = state.iteration + 1;
+    const change = mutationChange(execution, "repair", iteration);
     return {
       changes: [change],
       unresolvedRisks: change.unresolvedRisks,

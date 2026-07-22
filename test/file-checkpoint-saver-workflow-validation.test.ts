@@ -63,6 +63,7 @@ test("quarantines phase-incomplete workflow state", async () => {
   const directory = join(root, "checkpoints");
   const discoveredThread = "empty-discovery-state";
   const diagnosedThread = "empty-diagnostic-state";
+  const diagnosedAtBoundThread = "diagnosed-at-repair-bound";
 
   try {
     const saver = await FileCheckpointSaver.open(directory);
@@ -71,6 +72,34 @@ test("quarantines phase-incomplete workflow state", async () => {
     await saver.put(
       { configurable: { thread_id: discoveredThread } },
       checkpoint("checkpoint-empty-discovery", discovered),
+      { source: "input", step: -1, parents: {} },
+      {},
+    );
+
+    const diagnosedAtBound = validWorkflowState();
+    diagnosedAtBound.pattern = "delivery";
+    diagnosedAtBound.maxIterations = 1;
+    diagnosedAtBound.iteration = 1;
+    diagnosedAtBound.phase = "diagnosed";
+    diagnosedAtBound.workItems = [{ id: "core", title: "Core", instruction: "Implement core behavior" }];
+    diagnosedAtBound.acceptanceCriteria = ["tests pass"];
+    diagnosedAtBound.changes = [
+      { kind: "implementation", summary: "implemented", filesChanged: ["src/core.ts"], evidence: ["changed"], unresolvedRisks: [] },
+      { kind: "repair", summary: "repaired", filesChanged: ["src/core.ts"], evidence: ["changed"], unresolvedRisks: [] },
+    ];
+    diagnosedAtBound.verification = {
+      passed: false,
+      summary: "failed",
+      checks: [{ name: "tests", passed: false, evidence: "exit 1" }],
+    };
+    diagnosedAtBound.diagnostic = {
+      summary: "diagnosed",
+      rootCauses: ["remaining failure"],
+      repairInstructions: ["repair again"],
+    };
+    await saver.put(
+      { configurable: { thread_id: diagnosedAtBoundThread } },
+      checkpoint("checkpoint-diagnosed-at-bound", diagnosedAtBound),
       { source: "input", step: -1, parents: {} },
       {},
     );
@@ -112,6 +141,9 @@ test("quarantines phase-incomplete workflow state", async () => {
       "checkpoint is corrupt",
     );
     await expect(reopened.getTuple({ configurable: { thread_id: diagnosedThread } })).rejects.toThrow(
+      "checkpoint is corrupt",
+    );
+    await expect(reopened.getTuple({ configurable: { thread_id: diagnosedAtBoundThread } })).rejects.toThrow(
       "checkpoint is corrupt",
     );
   } finally {
