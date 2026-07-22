@@ -1,6 +1,6 @@
 # pi-langgraph
 
-`pi-langgraph` is a coding-first LangGraph extension for Pi and Senpi. Give it a normal software objective; the trusted compiler owns graph topology, bounds, routing, and validation.
+`pi-langgraph` is an explicit power mode for coding work in Pi and Senpi. Normal prompts stay on Pi's simple path; add the standalone keyword `ulw` when the trusted LangGraph compiler should own topology, bounds, routing, durability, and validation.
 
 ![pi-langgraph runtime: an objective becomes a Pi task tree, parallel discovery, a typed plan, implementation, verification, bounded repair, and evidence-based delivery on durable LangGraph state](docs/pi-langgraph-runtime.png)
 
@@ -14,23 +14,25 @@ senpi install git:github.com/ThewindMom/pi-langgraph
 
 Local development uses Bun: `bun install` then `pi -e ./src/index.ts`.
 
-### Just ask normally
+### Simple by default; add `ulw` for graph mode
 
-Once the extension is loaded and `langgraph_orchestrate` is active, its routing guidance is included in Pi's system prompt. Pi silently selects it for substantive repository work that benefits from discovery, parallel analysis, implementation plus verification, or review synthesis. You do not need to name the extension, write a task list, or describe a graph.
+Once the extension is loaded, ordinary prompts work exactly as they do in Pi. The extension does not classify or intercept them:
 
 ```text
 Implement account settings across the UI, API, database, and tests.
 ```
 
-Other normal prompts work the same way:
+Add one standalone `ulw` token when you want the durable graph workflow. You do not need to write “call pi-langgraph”, provide a task list, or describe a graph:
 
 ```text
-Review this repository for authentication vulnerabilities.
-Fix the flaky checkout tests and verify the complete payment flow.
-Refactor the persistence layer without changing its public API.
+ulw Implement account settings across the UI, API, database, and tests.
+Review this repository for authentication vulnerabilities ulw
+ULW Fix the flaky checkout tests and verify the complete payment flow.
 ```
 
-Tool selection is still a model decision, not a deterministic prompt interceptor. Naming `pi-langgraph` is therefore an optional override if a model misclassifies an ambiguous request; it is not the normal usage contract. If the tool is disabled or the extension was not loaded, Pi cannot select it automatically.
+The marker is case-insensitive and must be one whitespace-delimited token. A bare `ulw` has no objective and stays on the simple path; duplicate markers and lookalikes such as `ulw:`, `ulwfoo`, or `bulkwork` also stay simple. Extension-generated messages cannot recursively activate graph mode.
+
+The input hook deterministically converts a valid marker into a structural request for `langgraph_orchestrate`; Pi then performs the tool call. If the tool is disabled or the extension is not loaded, graph mode is unavailable. There is deliberately no separate mission mode: `ulw` is the one explicit graph workflow.
 
 The public tool accepts an objective-first coding request (or the legacy explicit DAG):
 
@@ -44,7 +46,7 @@ The public tool accepts an objective-first coding request (or the legacy explici
 
 The graph uses typed reduced state, private specialist subgraphs, LangGraph runtime `Send` fan-out, `Command` routing, bounded cycles, per-node retry/timeout policy, and checkpointed process-restart resume. A normal delivery proceeds through these phases:
 
-1. **Automatic activation.** Pi sees the active tool's system-prompt guidance and submits one objective-first `langgraph_orchestrate` call. The model supplies the objective and, only when useful, `workflow`, `maxIterations`, or `approval`; it cannot supply topology or runtime policy.
+1. **Explicit activation.** A valid standalone `ulw` marker is removed at Pi's raw-input boundary and replaced by a structural tool request containing the remaining objective. Ordinary and extension-generated prompts pass through unchanged. Pi submits one objective-first `langgraph_orchestrate` call; it cannot supply topology or runtime policy.
 2. **Safe compilation.** The extension parses the boundary input, selects read-only `review` when the objective contains only review/audit language and otherwise selects `delivery`, fixes the repair and recursion bounds, and creates typed initial state.
 3. **Repository discovery.** A Pi child worker inspects the repository and returns bounded work items, acceptance criteria, and optionally a versioned execution plan. Worker lifecycle events are attached to distinct child identities in Pi's task tree.
 4. **Dynamic specialist fan-out.** LangGraph `Send` starts one private specialist subgraph per work item. These leaves run concurrently and read only from disposable copies of the same repository snapshot. Their structured findings merge deterministically.
