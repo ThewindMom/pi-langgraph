@@ -2,17 +2,7 @@
 
 `pi-langgraph` is a coding-first LangGraph extension for Pi and Senpi. Give it a normal software objective; the trusted compiler owns graph topology, bounds, routing, and validation.
 
-```mermaid
-flowchart LR
- O[Objective] --> D[Read-only discovery]
- D --> S[Dynamic specialist Send wave]
- S --> P{Optional typed execution plan}
- P --> C[Per-change claim / implement]
- C --> V[Host verification + artifact refs]
- V -->|fail, budget remains| R[Diagnose / repair]
- R --> V
- V --> Y[Evidence synthesis]
-```
+![pi-langgraph runtime: an objective becomes a Pi task tree, parallel discovery, a typed plan, implementation, verification, bounded repair, and evidence-based delivery on durable LangGraph state](docs/pi-langgraph-runtime.png)
 
 ## Install and run
 
@@ -23,6 +13,16 @@ senpi install git:github.com/ThewindMom/pi-langgraph
 ```
 
 Local development uses Bun: `bun install` then `pi -e ./src/index.ts`.
+
+### Simplest use
+
+After loading the extension, ask Pi normally:
+
+```text
+Use pi-langgraph to implement account settings across the UI, API, database, and tests.
+```
+
+Pi calls `langgraph_orchestrate` once with the objective. The extension then owns decomposition, child-task fan-out, ordering, joins, verification, bounded repair, persistence, and final synthesis. You do not write a graph or task list. For a read-only pass, say `Use pi-langgraph to review this repository`. For changes that must pause before publication, say `Use pi-langgraph with approval before changes`.
 
 The public tool accepts an objective-first coding request (or the legacy explicit DAG):
 
