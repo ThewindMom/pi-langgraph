@@ -19,13 +19,13 @@ const request: ExecutionRequest = {
 describe("task executors", () => {
   test("uses the native task tool through the host execution pipeline", async () => {
     const calls: Array<{ name: string; params: unknown }> = [];
-    const pi = {
+    const pi: CompatibleExtensionAPI = {
       getActiveTools: () => ["task", "langgraph_orchestrate"],
       executeTool: async (name: string, params: unknown) => {
         calls.push({ name, params });
         return { content: [{ type: "text" as const, text: "reviewed" }], details: { status: "completed" } };
       },
-    } as unknown as CompatibleExtensionAPI;
+    };
 
     const output = await createTaskExecutor(pi, { cwd: "/tmp", model: undefined }).execute(request);
 
@@ -36,32 +36,67 @@ describe("task executors", () => {
   });
 
   test("selects the SDK fallback when Senpi's task tool is inactive", () => {
-    const pi = {
+    const pi: CompatibleExtensionAPI = {
       getActiveTools: () => ["langgraph_orchestrate"],
       executeTool: async () => ({ content: [], details: {} }),
-    } as unknown as CompatibleExtensionAPI;
+    };
 
     expect(() => createTaskExecutor(pi, { cwd: "/tmp", model: undefined })).not.toThrow();
   });
 
   test("marks native failed results as worker errors", async () => {
-    const pi = {
+    const pi: CompatibleExtensionAPI = {
       getActiveTools: () => ["task"],
       executeTool: async () => ({
         content: [{ type: "text" as const, text: "worker crashed" }],
         details: { status: "failed" },
       }),
-    } as unknown as CompatibleExtensionAPI;
+    };
 
     await expect(createTaskExecutor(pi, { cwd: "/tmp", model: undefined }).execute(request)).rejects.toThrow(
       "worker crashed",
     );
   });
+
+  test("rejects unknown native statuses instead of treating them as success", async () => {
+    const pi: CompatibleExtensionAPI = {
+      getActiveTools: () => ["task"],
+      executeTool: async () => ({
+        content: [{ type: "text" as const, text: "ambiguous" }],
+        details: { status: "mystery" },
+      }),
+    };
+
+    await expect(createTaskExecutor(pi, { cwd: "/tmp", model: undefined }).execute(request)).rejects.toThrow(
+      "unknown status",
+    );
+  });
+
+  test("does not silently ignore explicit overrides in the SDK fallback", async () => {
+    const pi: CompatibleExtensionAPI = {
+      getActiveTools: () => ["langgraph_orchestrate"],
+    };
+    const overridden: ExecutionRequest = {
+      ...request,
+      task: { ...request.task, model: "different-model" },
+    };
+
+    await expect(createTaskExecutor(pi, { cwd: "/tmp", model: undefined }).execute(overridden)).rejects.toThrow(
+      "does not support per-task agent or model overrides",
+    );
+  });
 });
 
-test("worker prompt carries dependency outputs without expanding scope", () => {
+test("worker prompt carries dependency outputs as structurally escaped data", () => {
   const prompt = buildTaskPrompt(request);
-  expect(prompt).toContain("Overall objective: ship");
-  expect(prompt).toContain('<dependency id="build" status="completed">\nbuilt\n</dependency>');
-  expect(prompt).toContain("Complete only this task");
+  const document = JSON.parse(prompt) as {
+    protocol: string;
+    objective: string;
+    assignment: { id: string; instruction: string };
+    dependencies: Array<{ id: string; status: string; output: string }>;
+  };
+  expect(document.protocol).toBe("pi-langgraph.task.v1");
+  expect(document.objective).toBe("ship");
+  expect(document.assignment).toEqual({ id: "review", instruction: "Review the implementation" });
+  expect(document.dependencies).toEqual([{ id: "build", status: "completed", output: "built" }]);
 });

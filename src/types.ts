@@ -63,17 +63,19 @@ export interface TaskExecutor {
   execute(request: ExecutionRequest, signal?: AbortSignal): Promise<string>;
 }
 
-export type ExecuteTool = <TDetails = unknown>(
+export type ExecuteTool = (
   toolName: string,
   params: unknown,
   options?: {
     readonly signal?: AbortSignal;
-    readonly onUpdate?: (update: AgentToolResult<TDetails>) => void;
+    readonly onUpdate?: (update: AgentToolResult<unknown>) => void;
   },
-) => Promise<AgentToolResult<TDetails>>;
+) => Promise<AgentToolResult<unknown>>;
 
-export type CompatibleExtensionAPI = ExtensionAPI & {
+export type CompatibleExtensionAPI = Pick<ExtensionAPI, "getActiveTools"> & {
   readonly executeTool?: ExecuteTool;
 };
+
+export type LangGraphExtensionAPI = CompatibleExtensionAPI & Pick<ExtensionAPI, "registerTool">;
 
 export type RuntimeContext = Pick<ExtensionContext, "cwd" | "model">;

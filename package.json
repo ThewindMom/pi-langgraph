@@ -1,8 +1,9 @@
 {
   "name": "pi-langgraph",
   "version": "0.1.0",
-  "description": "LangGraph orchestration for Pi coding agents",
+  "description": "Durable coding-first LangGraph workflows for Pi and Senpi",
   "type": "module",
+  "packageManager": "bun@1.3.14",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -12,7 +13,9 @@
     "pi-package",
     "langgraph",
     "orchestration",
-    "multi-agent"
+    "multi-agent",
+    "coding-agent",
+    "durable-execution"
   ],
   "files": [
     "src"
@@ -29,10 +32,11 @@
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.80.10",
     "@langchain/core": "^1.1.48",
-    "@langchain/langgraph": "1.4.8"
+    "@langchain/langgraph": "1.4.8",
+    "@langchain/langgraph-checkpoint": "1.1.3"
   },
   "peerDependencies": {
-    "typebox": "*"
+    "typebox": "^1.1.38"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",
