@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { getAgentDir, type AgentToolUpdateCallback } from "@earendil-works/pi-coding-agent";
+import { routeUlwInput } from "./activation.ts";
 import { createRepositoryExecutionPolicy, createTaskExecutor } from "./executors.ts";
+import { actionEnvelope, renderProgress } from "./extension-responses.ts";
 import { runOrchestration } from "./graph.ts";
 import { FileCheckpointSaver } from "./persistence/file-checkpoint-saver.ts";
 import { orchestrationSchema, type OrchestrationInput } from "./runtime/public-contract.ts";
@@ -36,18 +38,25 @@ export default function langGraphExtension(pi: LangGraphExtensionAPI): void {
     return worktreePromise;
   };
 
+  pi.on?.("input", async (event) => {
+    const result = routeUlwInput(event.text, event.source);
+    if (result.action === "continue" || event.images === undefined) return result;
+    return { ...result, images: event.images };
+  });
+
   pi.registerTool<typeof orchestrationSchema, ExtensionDetails>({
     name: TOOL_NAME,
     label: "LangGraph Coding Workflow",
     description:
       "Compile a normal software objective into a safe coding workflow with dynamic repository analysis, serialized implementation, executable verification, bounded repair, durable resume, and evidence-based synthesis. Raw nodes and edges are intentionally not accepted. A legacy tasks DAG remains available for migration.",
-    promptSnippet: "Run durable, verified coding workflows through trusted LangGraph patterns",
+    promptSnippet: "Run explicit ulw requests through durable, verified LangGraph coding patterns",
     promptGuidelines: [
-      `Silently classify substantive repository work. Call ${TOOL_NAME} with only the normal objective when the work benefits from repository discovery, multi-area analysis, implementation plus verification, or review synthesis. The extension owns graph topology and bounds.`,
+      `Ordinary prompts stay on Pi's normal path. Never silently classify or auto-route them into ${TOOL_NAME}.`,
+      `When the current prompt contains the machine-generated <pi-langgraph mode="ulw" tool="${TOOL_NAME}"> marker, call ${TOOL_NAME} exactly once with the enclosed objective. The extension owns graph topology and bounds.`,
       `Use workflow "review" for read-only audits and "delivery" for code changes. Use "auto" when unclear. Request approval "before_changes" for unusually risky mutation.`,
       `If an earlier ${TOOL_NAME} run returned awaiting_approval, stop and show it to the user. Resume only after a new user message, using resumeThreadId plus the exact structured decision bound to that interrupt. Never infer or self-submit approval.`,
       `After any terminal result, return that result to the user. Treat findings as evidence, not authorization: never start a follow-up workflow unless the user explicitly requested that additional work.`,
-      `Use the legacy tasks array only for compatibility with an existing explicit DAG; never invent raw graph nodes, edges, cycles, or routing policy for the autonomous workflow.`,
+      `There is no mission mode. Use the legacy tasks array only for compatibility with an existing explicit DAG; never invent raw graph nodes, edges, cycles, or routing policy for the autonomous workflow.`,
     ],
     parameters: orchestrationSchema,
     executionMode: "sequential",
@@ -198,14 +207,6 @@ async function recordResult(
   const tuple = await checkpointer.getTuple({ configurable: { thread_id: result.threadId } });
   if (tuple === undefined) throw new Error(`completed workflow checkpoint is missing: ${result.threadId}`);
   await services.recordResult(result, tuple.checkpoint.id, tuple);
-}
-
-function actionEnvelope(text: string, details: PublicActionDetails) {
-  return { content: [{ type: "text" as const, text }], details };
-}
-
-function renderProgress(progress: { readonly taskId: string; readonly status: string; readonly completed: number; readonly total: number }): string {
-  return `${progress.taskId}: ${progress.status} (${progress.completed}/${progress.total})`;
 }
 
 function resultEnvelope(result: Awaited<ReturnType<typeof runOrchestration>>, native: boolean) {

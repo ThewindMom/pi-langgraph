@@ -1,4 +1,10 @@
-import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+  AgentToolResult,
+  ExtensionAPI,
+  ExtensionContext,
+  InputEvent,
+  InputEventResult,
+} from "@earendil-works/pi-coding-agent";
 
 export const TOOL_NAME = "langgraph_orchestrate";
 export const DEFAULT_AGENT_TOOL = "task";
@@ -90,6 +96,12 @@ export type CompatibleExtensionAPI = Pick<ExtensionAPI, "getActiveTools"> & {
   readonly executeTool?: ExecuteTool;
 };
 
-export type LangGraphExtensionAPI = CompatibleExtensionAPI & Pick<ExtensionAPI, "registerTool">;
+interface LangGraphInputAPI {
+  on(event: "input", handler: (event: InputEvent) => InputEventResult | Promise<InputEventResult>): void;
+}
+
+export type LangGraphExtensionAPI = CompatibleExtensionAPI &
+  Partial<LangGraphInputAPI> &
+  Pick<ExtensionAPI, "registerTool">;
 
 export type RuntimeContext = Pick<ExtensionContext, "cwd" | "model">;

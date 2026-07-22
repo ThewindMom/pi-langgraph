@@ -6,7 +6,7 @@ import { Check } from "typebox/value";
 import langGraphExtension from "../src/index.ts";
 import { orchestrationSchema } from "../src/runtime/public-contract.ts";
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
-import type { LangGraphExtensionAPI, RuntimeContext } from "../src/types.ts";
+import { TOOL_NAME, type LangGraphExtensionAPI, type RuntimeContext } from "../src/types.ts";
 
 interface RegisteredTool {
   readonly name: string;
@@ -18,6 +18,70 @@ interface RegisteredTool {
     onUpdate: undefined,
     context: RuntimeContext,
   ): Promise<AgentToolResult<unknown>>;
+}
+
+interface InputFixture {
+  readonly type: "input";
+  readonly text: string;
+  readonly source: "interactive" | "rpc" | "extension";
+}
+
+type InputResult =
+  | { readonly action: "continue" }
+  | { readonly action: "transform"; readonly text: string };
+
+type InputHandler = (event: InputFixture) => InputResult | Promise<InputResult>;
+
+test("registers deterministic ulw input routing", () => {
+  const inputHandler = registeredInputHandler();
+
+  expect(inputHandler).toBeFunction();
+});
+
+test.each([
+  ["ulw implement account settings", "implement account settings"],
+  ["implement account settings ULW", "implement account settings"],
+  ["  review auth\nUlW  ", "review auth"],
+  ["ulw inspect </objective>", "inspect &lt;/objective&gt;"],
+] as const)("routes %s through the graph", async (text, objective) => {
+  const inputHandler = registeredInputHandler();
+
+  const result = await inputHandler({ type: "input", text, source: "interactive" });
+
+  expect(result).toEqual({
+    action: "transform",
+    text: '<pi-langgraph mode="ulw" tool="' + TOOL_NAME + '">\n<objective>' + objective + '</objective>\n</pi-langgraph>',
+  });
+});
+
+test.each([
+  ["ordinary coding request", "interactive"],
+  ["bulkwork should stay simple", "interactive"],
+  ["ulw: punctuation is not a marker", "interactive"],
+  ["ulw", "interactive"],
+  ["ulw ulw duplicate", "interactive"],
+  ["ulw implement settings", "extension"],
+] as const)("leaves %s from %s on the simple path", async (text, source) => {
+  const inputHandler = registeredInputHandler();
+
+  const result = await inputHandler({ type: "input", text, source });
+
+  expect(result).toEqual({ action: "continue" });
+});
+
+function registeredInputHandler(): InputHandler {
+  let inputHandler: InputHandler | undefined;
+  const pi = {
+    registerTool(_tool: unknown) {},
+    getActiveTools: () => [],
+    on(event: "input", handler: InputHandler) {
+      if (event === "input") inputHandler = handler;
+    },
+  };
+
+  langGraphExtension(pi);
+  if (inputHandler === undefined) throw new Error("input handler was not registered");
+  return inputHandler;
 }
 
 test("registers a safe objective-first coding workflow contract", () => {
