@@ -14,15 +14,23 @@ senpi install git:github.com/ThewindMom/pi-langgraph
 
 Local development uses Bun: `bun install` then `pi -e ./src/index.ts`.
 
-### Simplest use
+### Just ask normally
 
-After loading the extension, ask Pi normally:
+Once the extension is loaded and `langgraph_orchestrate` is active, its routing guidance is included in Pi's system prompt. Pi silently selects it for substantive repository work that benefits from discovery, parallel analysis, implementation plus verification, or review synthesis. You do not need to name the extension, write a task list, or describe a graph.
 
 ```text
-Use pi-langgraph to implement account settings across the UI, API, database, and tests.
+Implement account settings across the UI, API, database, and tests.
 ```
 
-Pi calls `langgraph_orchestrate` once with the objective. The extension then owns decomposition, child-task fan-out, ordering, joins, verification, bounded repair, persistence, and final synthesis. You do not write a graph or task list. For a read-only pass, say `Use pi-langgraph to review this repository`. For changes that must pause before publication, say `Use pi-langgraph with approval before changes`.
+Other normal prompts work the same way:
+
+```text
+Review this repository for authentication vulnerabilities.
+Fix the flaky checkout tests and verify the complete payment flow.
+Refactor the persistence layer without changing its public API.
+```
+
+Tool selection is still a model decision, not a deterministic prompt interceptor. Naming `pi-langgraph` is therefore an optional override if a model misclassifies an ambiguous request; it is not the normal usage contract. If the tool is disabled or the extension was not loaded, Pi cannot select it automatically.
 
 The public tool accepts an objective-first coding request (or the legacy explicit DAG):
 
@@ -34,9 +42,24 @@ The public tool accepts an objective-first coding request (or the legacy explici
 
 ## Architecture and execution contract
 
-The graph uses typed reduced state, private specialist subgraphs, LangGraph runtime `Send` fan-out, `Command` routing, bounded cycles, per-node retry/timeout policy, and checkpointed process-restart resume. Streaming projects LangGraph `updates`, `custom`, `tasks`, and `checkpoints` into ordered, namespaced events, with one terminal event.
+The graph uses typed reduced state, private specialist subgraphs, LangGraph runtime `Send` fan-out, `Command` routing, bounded cycles, per-node retry/timeout policy, and checkpointed process-restart resume. A normal delivery proceeds through these phases:
 
-Discovery may return a bounded, typed execution plan. When present, delivery runs a per-change loop: dependency-ready changes are claimed durably, implemented serially, checked against acceptance scripts, and marked applied or failed. Dynamic interrupts can pause at approval or a human decision boundary; resume continues the exact thread. A bounded replan may add a second specialist wave when discovery finds new subsystems.
+1. **Automatic activation.** Pi sees the active tool's system-prompt guidance and submits one objective-first `langgraph_orchestrate` call. The model supplies the objective and, only when useful, `workflow`, `maxIterations`, or `approval`; it cannot supply topology or runtime policy.
+2. **Safe compilation.** The extension parses the boundary input, selects read-only `review` when the objective contains only review/audit language and otherwise selects `delivery`, fixes the repair and recursion bounds, and creates typed initial state.
+3. **Repository discovery.** A Pi child worker inspects the repository and returns bounded work items, acceptance criteria, and optionally a versioned execution plan. Worker lifecycle events are attached to distinct child identities in Pi's task tree.
+4. **Dynamic specialist fan-out.** LangGraph `Send` starts one private specialist subgraph per work item. These leaves run concurrently and read only from disposable copies of the same repository snapshot. Their structured findings merge deterministically.
+5. **Bounded replanning.** Specialists may discover additional subsystems. The collector validates and deduplicates those proposals, respects the global work-item cap, and permits at most two expansion rounds rather than allowing unbounded graph growth.
+6. **Typed plan validation.** A supplied plan is parsed into ordered changes with stable IDs, append-only revisions, file scopes, dependencies, risk levels, and package-script acceptance checks. Unknown dependencies, cycles, unsafe paths, conflicting revisions, and out-of-scope changes fail before mutation.
+7. **Dependency-aware change execution.** The runtime selects the next dependency-ready change. Independent analysis remains parallel, but repository mutation is serialized so two workers never race to publish overlapping edits.
+8. **Human approval when required.** Explicit `before_changes` policy or a scoped risk boundary creates a durable LangGraph interrupt. The response contains an exact thread/plan/change/scope binding. Only a later user message carrying that binding can approve or reject it; an agent cannot self-approve with a boolean shortcut.
+9. **Isolated implementation.** The Pi worker receives an isolated working directory containing the exact dirty repository snapshot and independent Git metadata. Its structured report must exactly match the observed filesystem delta and the plan-authorized paths before any result can be published.
+10. **Durable mutation claim.** Before implementation or repair, the saver records the logical operation. A completed operation replays its recorded result after restart; an indeterminate crash window routes to verification instead of blindly invoking the same mutation again.
+11. **Trusted verification.** Per-change acceptance scripts and final integration checks run through the host evidence runner. Exit status, not worker prose, determines pass/fail. Bounded stdout and stderr become content-addressed artifact references.
+12. **Conditional repair.** A failed aggregate verification routes through read-only diagnosis and then a new, scoped repair operation. The graph returns to verification until checks pass or the finite repair budget is exhausted. Per-change failures retry only that change while completed dependencies remain reusable.
+13. **Evidence-based delivery.** Synthesis can use only typed findings, recorded changes, host verification, artifacts, and unresolved risks. Passing checks produce `completed`; rejection or exhausted repair produces resumable `needs_attention`, never a false success.
+14. **Streaming and durability.** Throughout the run, LangGraph `updates`, `custom`, `tasks`, and `checkpoints` are projected into ordered, namespaced events with one terminal event. Checkpoints preserve successful siblings, pending interrupts, state history, and restart/resume position.
+
+For a `review` workflow, the graph stops after discovery, specialist analysis, optional replanning, and evidence synthesis. It never enters approval, implementation, or repair.
 
 Host verification—not worker assertions—determines pass/fail. stdout and stderr are captured as bounded content-addressed artifacts; results carry artifact references (digest, byte count, truncation), check status, and risks. A delivery result is `completed` only when all reported checks pass; otherwise it is `needs_attention` with retained evidence.
 
