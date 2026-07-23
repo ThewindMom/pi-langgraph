@@ -15,27 +15,19 @@ import { restoreThread } from "./checkpoint-memory-snapshot.ts";
 import { migrateLegacyMutationJournal } from "./legacy-mutation-migration.ts";
 import type { SerializedMutationEntry } from "./mutation-journal.ts";
 import { validateEffectiveWorkflowState, type PersistedWorkflowWrite } from "./workflow-pending-write-validation.ts";
-
-export type RepositoryCheckpointIdentity = Readonly<{
-  protocolVersion: 1;
-  snapshotId: string;
-  head: string | null;
-}>;
-
-const SNAPSHOT_ID = /^[a-f0-9]{64}$/;
-const GIT_OBJECT_ID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
-
-export function repositoryCheckpointIdentity(metadata: unknown): RepositoryCheckpointIdentity | undefined {
-  if (typeof metadata !== "object" || metadata === null || !("repositorySnapshot" in metadata)) return undefined;
-  const value: unknown = metadata.repositorySnapshot;
-  if (typeof value !== "object" || value === null ||
-    !("protocolVersion" in value) || value.protocolVersion !== 1 ||
-    !("snapshotId" in value) || typeof value.snapshotId !== "string" || !SNAPSHOT_ID.test(value.snapshotId) ||
-    !("head" in value) || (value.head !== null && (typeof value.head !== "string" || !GIT_OBJECT_ID.test(value.head)))) {
-    throw new Error("invalid checkpoint repository snapshot identity");
-  }
-  return { protocolVersion: 1, snapshotId: value.snapshotId, head: value.head };
-}
+import {
+  checkpointReplayMetadata,
+  repositoryCheckpointIdentity,
+} from "./checkpoint-replay-metadata.ts";
+export {
+  checkpointReplayMetadata,
+  repositoryCheckpointIdentity,
+} from "./checkpoint-replay-metadata.ts";
+export type {
+  CheckpointReplayMetadata,
+  ReplaySafetyContext,
+  RepositoryCheckpointIdentity,
+} from "./checkpoint-replay-metadata.ts";
 
 export async function hydrateCheckpointThread(
   memory: MemorySaver,
@@ -63,6 +55,7 @@ export async function hydrateCheckpointThread(
       );
       validateCheckpointMetadata(decodedMetadata);
       repositoryCheckpointIdentity(decodedMetadata);
+      checkpointReplayMetadata(decodedMetadata);
       if (namespace === "") rootStates.set(checkpointId, channels);
       hydrated[checkpointId] = [checkpoint, metadata, entry.parentCheckpointId];
     }

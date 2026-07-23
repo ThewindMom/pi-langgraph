@@ -1,11 +1,11 @@
-import type { OrchestrationTask } from "../types.ts";
+import type { WorkerTask } from "../types.ts";
 import { decodeDiscoveryEnvelope, InvalidDiscoveryEnvelopeError } from "./compiler.ts";
 import { InvalidExecutionPlanError } from "./execution-plan.ts";
 import { InvalidWorkerOutputError, parseDiscovery } from "./parsers.ts";
 import { task, workerPrompt } from "./worker-prompts.ts";
 import type { DiscoveryResult, ExecutionPlan } from "./types.ts";
 
-type ExecuteWorker = (task: OrchestrationTask, objective: string) => Promise<string>;
+type ExecuteWorker = (task: WorkerTask, objective: string) => Promise<string>;
 
 const outputShape = {
   workItems: [{ id: "lexical-id", title: "string", instruction: "self-contained string" }],

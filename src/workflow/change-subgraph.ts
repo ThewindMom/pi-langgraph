@@ -1,7 +1,7 @@
 import { Annotation, END, START, StateGraph, interrupt } from "@langchain/langgraph";
 import type { ArtifactRef } from "../evidence/types.ts";
 import type { MutationExecution, MutationOperation } from "../persistence/mutation-journal.ts";
-import type { OrchestrationTask } from "../types.ts";
+import type { WorkerTask } from "../types.ts";
 import { isAggregatePlan } from "./compiler.ts";
 import { mutationChange } from "./mutation-reconciliation.ts";
 import { assertDecisionScope, parseInterruptDecision, rebindInterruptToCurrentConfig } from "./risk-policy.ts";
@@ -55,7 +55,7 @@ const ChangeOutput = Annotation.Root({
 
 type ChangeStateValue = typeof ChangeState.State;
 type ExecuteMutation = (
-  task: OrchestrationTask,
+  task: WorkerTask,
   objective: string,
   operation: MutationOperation,
 ) => Promise<MutationExecution>;

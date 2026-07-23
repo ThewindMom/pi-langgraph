@@ -1,6 +1,6 @@
 import { open, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { MAX_CHECKPOINT_FILE_BYTES, isRecord } from "./file-checkpoint-format.ts";
 
 export async function readBoundedFile(path: string): Promise<string> {
@@ -65,4 +65,8 @@ export function assertCheckpointFileSize(contents: string): void {
 
 export function isNodeErrorCode(value: unknown, code: string): boolean {
   return isRecord(value) && value.code === code;
+}
+
+export function checkpointFileFingerprint(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
 }

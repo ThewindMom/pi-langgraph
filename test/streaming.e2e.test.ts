@@ -66,6 +66,10 @@ test("workflow stream projects causal LangGraph payloads with stable bounded ide
     typeof event.taskId === "string" && event.nodeId === "discover")).toBe(true);
   expect(events.some((event) => event.kind === "checkpoint" && "checkpointId" in event &&
     typeof event.checkpointId === "string")).toBe(true);
+  expect(events.some((event) => event.kind === "checkpoint" && "semanticLabels" in event &&
+    event.semanticLabels.includes("post-discovery") && event.semanticLabels.includes("pre-mutation"))).toBe(true);
+  expect(events.some((event) => event.kind === "checkpoint" && "semanticLabels" in event &&
+    event.semanticLabels.includes("last-known-green"))).toBe(true);
 
   const parentChangeTask = events.findIndex((event) => event.kind === "task" && "nodeId" in event && event.nodeId === "change");
   const nestedChange = events.findIndex((event) => event.namespace.startsWith("change:"));

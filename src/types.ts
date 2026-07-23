@@ -4,15 +4,17 @@ import type {
   ExtensionContext,
   InputEvent,
   InputEventResult,
+  SessionBeforeForkEvent,
+  SessionBeforeTreeEvent,
+  SessionStartEvent,
+  SessionTreeEvent,
 } from "@earendil-works/pi-coding-agent";
+import type { PiSessionReader } from "./bridge/session-checkpoint-bridge.ts";
 
 export const TOOL_NAME = "langgraph_orchestrate";
 export const DEFAULT_AGENT_TOOL = "task";
-export const MAX_TASKS = 32;
 
-export type FailurePolicy = "fail-fast" | "continue";
-
-export interface OrchestrationTask {
+export interface WorkerTask {
   readonly id: string;
   readonly prompt: string;
   readonly allowedFiles?: readonly string[];
@@ -21,13 +23,7 @@ export interface OrchestrationTask {
   readonly model?: string;
 }
 
-export interface OrchestrationPlan {
-  readonly objective: string;
-  readonly tasks: readonly OrchestrationTask[];
-  readonly failurePolicy?: FailurePolicy;
-}
-
-export interface TaskResult {
+export interface WorkerResult {
   readonly id: string;
   readonly status: "completed" | "failed";
   readonly output?: string;
@@ -36,16 +32,10 @@ export interface TaskResult {
   readonly completedAt: string;
 }
 
-export interface OrchestrationResult {
-  readonly objective: string;
-  readonly status: "completed" | "completed_with_errors";
-  readonly results: readonly TaskResult[];
-}
-
 export interface ExecutionRequest {
   readonly objective: string;
-  readonly task: OrchestrationTask;
-  readonly dependencyResults: readonly TaskResult[];
+  readonly task: WorkerTask;
+  readonly dependencyResults: readonly WorkerResult[];
 }
 
 export interface ProgressEvent {
@@ -68,14 +58,11 @@ export interface TaskExecutionOptions {
   readonly onEvent?: (event: TaskLifecycleEvent) => void;
   readonly workingDirectory?: string;
 }
-export interface OrchestrationProgress {
+export interface WorkflowProgress {
   readonly objective: string;
   readonly status: "running";
   readonly progress: ProgressEvent;
 }
-
-export type OrchestrationDetails = OrchestrationResult | OrchestrationProgress;
-
 
 export type ProgressReporter = (event: ProgressEvent) => void;
 
@@ -97,11 +84,43 @@ export type CompatibleExtensionAPI = Pick<ExtensionAPI, "getActiveTools"> & {
 };
 
 interface LangGraphInputAPI {
-  on(event: "input", handler: (event: InputEvent) => InputEventResult | Promise<InputEventResult>): void;
+  on(
+    event: "input",
+    handler: (
+      event: InputEvent,
+      context: RuntimeContext & { readonly signal?: AbortSignal | undefined },
+    ) => InputEventResult | Promise<InputEventResult>,
+  ): void;
 }
 
 export type LangGraphExtensionAPI = CompatibleExtensionAPI &
   Partial<LangGraphInputAPI> &
+  Partial<Pick<ExtensionAPI, "appendEntry" | "sendMessage" | "setLabel">> &
   Pick<ExtensionAPI, "registerTool">;
 
-export type RuntimeContext = Pick<ExtensionContext, "cwd" | "model">;
+export type RuntimeContext = Pick<ExtensionContext, "cwd" | "model"> & {
+  readonly sessionManager?: PiSessionReader;
+};
+export type PiLifecycleContext = RuntimeContext & {
+  readonly sessionManager: PiSessionReader;
+};
+
+type LifecycleHandler<Event, Result = void> = (
+  event: Event,
+  context: PiLifecycleContext,
+) => Result | Promise<Result | void> | void;
+
+export interface PiLifecycleAPI {
+  appendEntry(customType: string, data?: unknown): void;
+  setLabel(entryId: string, label: string | undefined): void;
+  on(event: "session_start", handler: LifecycleHandler<SessionStartEvent>): void;
+  on(
+    event: "session_before_tree",
+    handler: LifecycleHandler<SessionBeforeTreeEvent, Readonly<{ cancel?: boolean }>>,
+  ): void;
+  on(event: "session_tree", handler: LifecycleHandler<SessionTreeEvent>): void;
+  on(
+    event: "session_before_fork",
+    handler: LifecycleHandler<SessionBeforeForkEvent, Readonly<{ cancel?: boolean }>>,
+  ): void;
+}

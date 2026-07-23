@@ -1,4 +1,8 @@
 import type { ArtifactRef } from "../evidence/types.ts";
+import {
+  semanticCheckpointLabels,
+  type SemanticCheckpointLabel,
+} from "../persistence/workflow-state-validation.ts";
 
 export type WorkflowEventKind = "update" | "custom" | "task" | "checkpoint" | "terminal";
 export type WorkflowTerminalStatus = "awaiting_approval" | "completed" | "needs_attention";
@@ -30,6 +34,7 @@ export type WorkflowEvent =
       readonly checkpointId: string;
       readonly parentCheckpointId?: string;
       readonly nodeId?: string;
+      readonly semanticLabels: readonly SemanticCheckpointLabel[];
     })
   | (EventBase & { readonly kind: "terminal"; readonly status: WorkflowTerminalStatus });
 
@@ -130,6 +135,7 @@ function checkpointEvents(identity: EventIdentity, payload: unknown): readonly W
     checkpointId,
     ...(parentCheckpointId === undefined ? {} : { parentCheckpointId }),
     ...(nodeId === undefined ? {} : { nodeId }),
+    semanticLabels: identity.namespace === "root" ? semanticCheckpointLabels(values) : [],
     detail: boundedJson({ metadata: payload.metadata, next: payload.next }),
     artifactRefs: artifactRefs(values),
     ...changeIdentity(values),

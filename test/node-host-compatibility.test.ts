@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -25,6 +25,7 @@ test("production runtime does not require Bun globals inside Senpi's Node host",
 
   const buildRoot = await mkdtemp(join(tmpdir(), "pi-langgraph-node-host-"));
   try {
+    await symlink(join(projectRoot, "node_modules"), join(buildRoot, "node_modules"), "dir");
     const entry = join(buildRoot, "index.mjs");
     const build = spawnSync("bun", [
       "build", "./src/index.ts", "--target", "node", "--outfile", entry,

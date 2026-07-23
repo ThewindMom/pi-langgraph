@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { chmod, link, lstat, mkdir, open, readFile, realpath, rm, unlink } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readFile, realpath, rename, rm, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import {
   type CreateForkInput,
@@ -14,7 +14,7 @@ import {
 
 type GitResult = Readonly<{ stdout: string; stderr: string; exitCode: number }>;
 
-function git(cwd: string, args: readonly string[]): GitResult {
+export function git(cwd: string, args: readonly string[]): GitResult {
   const result = spawnSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   return {
     stdout: result.stdout ?? "",
@@ -23,7 +23,7 @@ function git(cwd: string, args: readonly string[]): GitResult {
   };
 }
 
-function gitOutput(cwd: string, args: readonly string[], operation: string): string {
+export function gitOutput(cwd: string, args: readonly string[], operation: string): string {
   const result = git(cwd, args);
   if (result.exitCode !== 0) {
     throw new WorktreeManagerError("git_failure", `${operation}: ${result.stderr.trim()}`);
@@ -35,7 +35,7 @@ function hasCode(error: unknown, code: string): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === code;
 }
 
-async function ensurePrivateDirectory(path: string): Promise<string> {
+export async function ensurePrivateDirectory(path: string): Promise<string> {
   await mkdir(path, { recursive: true, mode: 0o700 });
   const info = await lstat(path);
   if (!info.isDirectory() || info.isSymbolicLink()) {
@@ -46,19 +46,27 @@ async function ensurePrivateDirectory(path: string): Promise<string> {
 }
 
 async function readManifest(path: string): Promise<ForkManifest | undefined> {
+  return readWorkspaceManifest(path, parseManifest, "worktree manifest is not a regular file");
+}
+
+export async function readWorkspaceManifest<T>(
+  path: string,
+  parse: (bytes: Uint8Array) => T,
+  invalidMessage: string,
+): Promise<T | undefined> {
   try {
     const info = await lstat(path);
     if (!info.isFile() || info.isSymbolicLink()) {
-      throw new WorktreeManagerError("invalid_manifest", "worktree manifest is not a regular file");
+      throw new WorktreeManagerError("invalid_manifest", invalidMessage);
     }
-    return parseManifest(await readFile(path));
+    return parse(await readFile(path));
   } catch (error) {
     if (hasCode(error, "ENOENT")) return undefined;
     throw error;
   }
 }
 
-async function pathExists(path: string): Promise<boolean> {
+export async function pathExists(path: string): Promise<boolean> {
   try {
     await lstat(path);
     return true;
@@ -75,6 +83,25 @@ async function syncDirectory(path: string): Promise<void> {
   } finally {
     await handle.close();
   }
+}
+
+export async function replaceWorkspaceManifest(path: string, bytes: Uint8Array): Promise<void> {
+  const temporary = `${path}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
+  const handle = await open(temporary, "wx", 0o600);
+  try {
+    await handle.writeFile(bytes);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await rename(temporary, path);
+  await chmod(path, 0o600);
+  await syncDirectory(dirname(path));
+}
+
+export async function removeWorkspaceManifest(path: string): Promise<void> {
+  await unlink(path);
+  await syncDirectory(dirname(path));
 }
 
 function isRegistered(repositoryRoot: string, workspacePath: string): boolean {

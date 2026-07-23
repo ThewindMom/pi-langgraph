@@ -31,6 +31,7 @@ export class WorktreeManagerError extends Error {
       | "invalid_checkpoint"
       | "git_failure"
       | "fork_conflict"
+      | "candidate_conflict"
       | "unsafe_cleanup",
     message: string,
   ) {
@@ -56,18 +57,11 @@ export function validateObjectId(value: string, label: string): void {
 }
 
 export function serializeManifest(manifest: ForkManifest): Uint8Array {
-  return new TextEncoder().encode(`${JSON.stringify(manifest)}\n`);
+  return serializeJson(manifest);
 }
 
 export function parseManifest(bytes: Uint8Array): ForkManifest {
-  if (bytes.byteLength > MAX_MANIFEST_BYTES) invalidManifest();
-  let value: unknown;
-  try {
-    value = JSON.parse(new TextDecoder().decode(bytes));
-  } catch (error) {
-    if (error instanceof SyntaxError) invalidManifest();
-    throw error;
-  }
+  const value = parseJson(bytes);
   if (typeof value !== "object" || value === null) invalidManifest();
   if (
     !("protocolVersion" in value) || value.protocolVersion !== 1 ||
@@ -91,6 +85,20 @@ export function parseManifest(bytes: Uint8Array): ForkManifest {
     forkThreadId: value.forkThreadId,
     workspacePath: value.workspacePath,
   });
+}
+
+function serializeJson(value: ForkManifest): Uint8Array {
+  return new TextEncoder().encode(`${JSON.stringify(value)}\n`);
+}
+
+function parseJson(bytes: Uint8Array): unknown {
+  if (bytes.byteLength > MAX_MANIFEST_BYTES) invalidManifest();
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } catch (error) {
+    if (error instanceof SyntaxError) invalidManifest();
+    throw error;
+  }
 }
 
 function invalidManifest(): never {

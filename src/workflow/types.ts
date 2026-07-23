@@ -227,6 +227,7 @@ export interface CodingRunOptions {
 export interface ResumeRunOptions extends Omit<CodingRunOptions, "threadId" | "requireApproval"> {
   readonly approved?: boolean;
   readonly decision?: InterruptDecision;
+  readonly checkpointId?: string;
 }
 
 export interface WorkflowRuntimeDependencies {

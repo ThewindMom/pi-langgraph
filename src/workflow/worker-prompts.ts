@@ -1,6 +1,6 @@
-import type { OrchestrationTask } from "../types.ts";
+import type { WorkerTask } from "../types.ts";
 
-export function task(id: string, prompt: string): OrchestrationTask {
+export function task(id: string, prompt: string): WorkerTask {
   return { id, prompt };
 }
 

@@ -55,6 +55,21 @@ export async function withCheckpointFileLock<T>(
   }
 }
 
+export async function withFileLock<T>(
+  directory: string,
+  key: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  while (true) {
+    try {
+      return await withCheckpointFileLock(directory, key, operation);
+    } catch (error) {
+      if (error instanceof CheckpointLockTimeoutError) continue;
+      throw error;
+    }
+  }
+}
+
 function lockPath(directory: string, threadId: string): string {
   return join(directory, `${createHash("sha256").update(threadId).digest("hex")}.lock`);
 }

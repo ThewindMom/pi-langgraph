@@ -121,8 +121,19 @@ export async function resumeCodingWorkflow(
   if (checkpointer === undefined) throw new Error("resume requires the checkpointer that owns the thread");
 
   return withThreadLease(threadId, async () => {
-    const tuple = await checkpointer.getTuple({ configurable: { thread_id: threadId } });
+    const tuple = await checkpointer.getTuple({
+      configurable: {
+        thread_id: threadId,
+        ...(options.checkpointId === undefined ? {} : { checkpoint_id: options.checkpointId }),
+      },
+    });
     if (tuple === undefined) throw new Error(`no checkpoint exists for thread ${JSON.stringify(threadId)}`);
+    if (options.checkpointId !== undefined) {
+      const latest = await checkpointer.getTuple({ configurable: { thread_id: threadId } });
+      if (tuple.checkpoint.id !== options.checkpointId || latest?.checkpoint.id !== options.checkpointId) {
+        throw new ResumeCheckpointSelectionError(options.checkpointId);
+      }
+    }
     const saved = readSavedControlState(tuple);
     const savedStatus = checkpointChannelValue(tuple, "status");
     const pendingInterrupt = savedStatus === "awaiting_approval" && hasPendingGraphInterrupt(tuple)
@@ -161,7 +172,16 @@ export async function resumeCodingWorkflow(
       },
     );
     const runId = randomUUID();
-    const config = streamInvocationConfig({ threadId, runId }, saved.recursionLimit, options.signal);
+    const latestConfig = streamInvocationConfig({ threadId, runId }, saved.recursionLimit, options.signal);
+    const config = options.checkpointId === undefined
+      ? latestConfig
+      : {
+        ...latestConfig,
+        configurable: {
+          ...latestConfig.configurable,
+          checkpoint_id: options.checkpointId,
+        },
+      };
     let sequence = 0;
     const input = decision === undefined
       ? null
@@ -173,7 +193,7 @@ export async function resumeCodingWorkflow(
       }
       sequence += events.length;
     }
-    const state = (await graph.getState(config)).values;
+    const state = (await graph.getState(latestConfig)).values;
     const result = await projectLatestResult(checkpointer, threadId, state);
     options.onEvent?.(terminalEvent(
       { runId, threadId, sequence },
@@ -186,6 +206,14 @@ export async function resumeCodingWorkflow(
     }
     return result;
   });
+}
+
+export class ResumeCheckpointSelectionError extends Error {
+  readonly name = "ResumeCheckpointSelectionError";
+
+  constructor(readonly checkpointId: string) {
+    super(`checkpoint is no longer the latest resumable checkpoint: ${checkpointId}`);
+  }
 }
 
 async function projectLatestResult(

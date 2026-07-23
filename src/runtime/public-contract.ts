@@ -1,25 +1,10 @@
 import { Type, type Static } from "typebox";
-import { MAX_TASKS } from "../types.ts";
 
 const threadId = () => Type.String({
   minLength: 1,
   maxLength: 128,
   pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
 });
-
-const taskSchema = Type.Object({
-  id: Type.String({ minLength: 1, maxLength: 64, pattern: "^[A-Za-z][A-Za-z0-9_-]{0,63}$" }),
-  prompt: Type.String({ minLength: 1 }),
-  dependsOn: Type.Optional(Type.Array(Type.String(), { uniqueItems: true })),
-  agent: Type.Optional(Type.String({ minLength: 1 })),
-  model: Type.Optional(Type.String({ minLength: 1 })),
-}, { additionalProperties: false });
-
-const legacySchema = Type.Object({
-  objective: Type.String({ minLength: 1 }),
-  tasks: Type.Array(taskSchema, { minItems: 1, maxItems: MAX_TASKS }),
-  failurePolicy: Type.Optional(Type.Union([Type.Literal("fail-fast"), Type.Literal("continue")])),
-}, { additionalProperties: false });
 
 const codingWorkflowSchema = Type.Object({
   objective: Type.String({
@@ -75,6 +60,6 @@ const forkSchema = Type.Object({
 }, { additionalProperties: false });
 
 export const orchestrationSchema = Type.Union([
-  listSchema, historySchema, forkSchema, codingWorkflowSchema, resumeSchema, legacySchema,
+  listSchema, historySchema, forkSchema, codingWorkflowSchema, resumeSchema,
 ]);
 export type OrchestrationInput = Static<typeof orchestrationSchema>;

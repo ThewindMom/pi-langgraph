@@ -10,7 +10,7 @@ import type { RepositoryCheckpointIdentity } from "../persistence/checkpoint-thr
 import { createRepositorySnapshot, type RepositorySnapshot } from "../repository/snapshot.ts";
 import { runInIsolatedRepository } from "../repository/mutation-scope.ts";
 import { validateMutationOutput } from "./mutation-output.ts";
-import type { ExecutionRequest, TaskExecutor, TaskResult } from "../types.ts";
+import type { ExecutionRequest, TaskExecutor, WorkerResult } from "../types.ts";
 import type { CodingRunResult } from "../workflow/types.ts";
 import type { CheckpointTuple } from "@langchain/langgraph-checkpoint";
 
@@ -170,7 +170,7 @@ export class RepositoryServices {
     const fact = await this.memory.get(this.snapshot, MEMORY_KEY);
     if (fact === undefined) return request;
     const now = new Date().toISOString();
-    const dependency: TaskResult = {
+    const dependency: WorkerResult = {
       id: "repository_memory_exact_snapshot_untrusted",
       status: "completed",
       output: JSON.stringify({ trust: "untrusted_dependency_context", fact }),

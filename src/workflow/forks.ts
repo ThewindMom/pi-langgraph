@@ -6,14 +6,29 @@ import type {
   PendingWrite,
 } from "@langchain/langgraph-checkpoint";
 import type { CreateForkInput, ForkManifest } from "../workspace/format.ts";
-import { repositoryCheckpointIdentity } from "../persistence/checkpoint-thread-codec.ts";
+import {
+  checkpointReplayMetadata,
+  repositoryCheckpointIdentity,
+  type ReplaySafetyContext,
+  type RepositoryCheckpointIdentity,
+} from "../persistence/checkpoint-thread-codec.ts";
 import type { ArtifactRef } from "../evidence/types.ts";
+import type { RepositorySnapshotStore } from "../repository/repository-snapshot-store.ts";
 import { WorktreeManager } from "../workspace/worktree-manager.ts";
 import { validateThreadId } from "./runtime-control.ts";
 
 export interface ForkWorkflowCheckpointInput extends CreateForkInput {
   readonly checkpointer: BaseCheckpointSaver;
   readonly worktreeManager: WorktreeManager;
+  readonly snapshotStore?: RepositorySnapshotStore;
+  readonly retainArtifacts?: (forkThreadId: string, refs: readonly ArtifactRef[]) => Promise<void>;
+}
+
+export interface CloneWorkflowCheckpointInput {
+  readonly checkpointer: BaseCheckpointSaver;
+  readonly sourceThreadId: string;
+  readonly checkpointId: string;
+  readonly forkThreadId: string;
   readonly retainArtifacts?: (forkThreadId: string, refs: readonly ArtifactRef[]) => Promise<void>;
 }
 
@@ -21,53 +36,126 @@ export class WorkflowForkError extends Error {
   readonly name = "WorkflowForkError";
 }
 
+interface ReplayBindingCheckpointSaver extends BaseCheckpointSaver {
+  bindRepositorySnapshot(threadId: string, identity: RepositoryCheckpointIdentity): void;
+  bindReplaySafety(threadId: string, context: ReplaySafetyContext): void;
+}
+
 interface PendingWriteBatchSaver {
-  putWritesBatch(
-    config: RunnableConfig,
-    groups: readonly { readonly taskId: string; readonly writes: PendingWrite[] }[],
-  ): Promise<void>;
+  putWritesBatch(config: RunnableConfig, groups: readonly { readonly taskId: string; readonly writes: PendingWrite[] }[]): Promise<void>;
 }
 
 export async function forkWorkflowCheckpoint(input: ForkWorkflowCheckpointInput): Promise<ForkManifest> {
-  validateThreadId(input.sourceThreadId);
-  validateThreadId(input.forkThreadId);
-  validateCheckpointId(input.checkpointId);
-  const target = threadConfig(input.forkThreadId);
-  if (await input.checkpointer.getTuple(target) !== undefined) {
-    throw new WorkflowForkError(`fork thread already has checkpoints: ${input.forkThreadId}`);
-  }
-  const source = await input.checkpointer.getTuple(checkpointConfig(input.sourceThreadId, input.checkpointId));
-  if (source === undefined || source.checkpoint.id !== input.checkpointId) {
-    throw new WorkflowForkError(`source checkpoint does not exist: ${input.checkpointId}`);
-  }
+  const prepared = await prepareClone(input, false);
+  const source = prepared.checkpoints.at(-1);
+  if (source === undefined) throw new WorkflowForkError(`source checkpoint does not exist: ${input.checkpointId}`);
   if (source.metadata === undefined) throw new WorkflowForkError("source checkpoint metadata is missing");
   const repository = repositoryCheckpointIdentity(source.metadata);
   if (repository?.head !== input.gitCommit) {
     throw new WorkflowForkError("Git commit is not bound to the selected checkpoint repository snapshot");
   }
-  const checkpoints = await checkpointTree(input.checkpointer, input.sourceThreadId, source);
 
   const manifest = await input.worktreeManager.createFork(input);
   try {
-    for (const entry of checkpoints) {
-      const metadata = entry.metadata;
-      if (metadata === undefined) throw new WorkflowForkError("source checkpoint metadata is missing");
-      const namespace = checkpointNamespace(entry);
-      const storedConfig = await input.checkpointer.put(
-        targetConfig(input.forkThreadId, namespace, parentCheckpointId(entry)),
-        entry.checkpoint,
-        forkMetadata(metadata),
-        entry.checkpoint.channel_versions,
-      );
-      await copyPendingWrites(input.checkpointer, storedConfig, entry.pendingWrites ?? []);
-    }
-    await input.retainArtifacts?.(input.forkThreadId, checkpointArtifacts(checkpoints));
+    const forkSnapshot = await input.snapshotStore?.capture(manifest.workspacePath);
+    bindForkReplay(input.checkpointer, input.forkThreadId, source.metadata, forkSnapshot === undefined
+      ? undefined
+      : {
+        protocolVersion: 1,
+        snapshotId: forkSnapshot.snapshotId,
+        head: forkSnapshot.baselineHead,
+      });
+    await copyPreparedClone(input, prepared);
     return manifest;
   } catch (error) {
     await input.checkpointer.deleteThread(input.forkThreadId);
     await input.worktreeManager.cleanup(input.forkThreadId);
     throw error;
   }
+}
+
+function bindForkReplay(
+  checkpointer: BaseCheckpointSaver,
+  forkThreadId: string,
+  metadata: CheckpointMetadata,
+  forkRepository?: RepositoryCheckpointIdentity,
+): void {
+  if (!supportsReplayBindings(checkpointer)) return;
+  const repository = forkRepository ?? repositoryCheckpointIdentity(metadata);
+  const replay = checkpointReplayMetadata(metadata)?.replayBinding;
+  if (repository === undefined || replay === undefined) return;
+  checkpointer.bindRepositorySnapshot(forkThreadId, repository);
+  checkpointer.bindReplaySafety(forkThreadId, {
+    bridgeProtocolVersion: replay.bridgeProtocolVersion,
+    workflowVersion: replay.workflowVersion,
+    stateVersion: replay.stateVersion,
+    workflowInput: replay.workflowInput,
+    toolModelConfigDigest: replay.toolModelConfigDigest,
+    effectLedgerDigest: replay.effectLedgerDigest,
+  });
+}
+
+function supportsReplayBindings(
+  checkpointer: BaseCheckpointSaver,
+): checkpointer is ReplayBindingCheckpointSaver {
+  return "bindRepositorySnapshot" in checkpointer && typeof checkpointer.bindRepositorySnapshot === "function" &&
+    "bindReplaySafety" in checkpointer && typeof checkpointer.bindReplaySafety === "function";
+}
+
+export async function cloneWorkflowCheckpoint(input: CloneWorkflowCheckpointInput): Promise<void> {
+  const prepared = await prepareClone(input, true);
+  try {
+    if (prepared.targetPopulated) await input.checkpointer.deleteThread(input.forkThreadId);
+    await copyPreparedClone(input, prepared);
+  } catch (error) {
+    await input.checkpointer.deleteThread(input.forkThreadId);
+    throw error;
+  }
+}
+
+type PreparedClone = Readonly<{ checkpoints: readonly CheckpointTuple[]; targetPopulated: boolean }>;
+
+async function prepareClone(
+  input: CloneWorkflowCheckpointInput,
+  allowOwnedResume: boolean,
+): Promise<PreparedClone> {
+  validateThreadId(input.sourceThreadId);
+  validateThreadId(input.forkThreadId);
+  validateCheckpointId(input.checkpointId);
+  const existing: CheckpointTuple[] = [];
+  for await (const tuple of input.checkpointer.list(threadConfig(input.forkThreadId))) existing.push(tuple);
+  if (!allowOwnedResume && existing.length > 0) {
+    throw new WorkflowForkError(`fork thread already has checkpoints: ${input.forkThreadId}`);
+  }
+  const source = await input.checkpointer.getTuple(checkpointConfig(input.sourceThreadId, input.checkpointId));
+  if (source === undefined || source.checkpoint.id !== input.checkpointId) {
+    throw new WorkflowForkError(`source checkpoint does not exist: ${input.checkpointId}`);
+  }
+  const checkpoints = await checkpointTree(input.checkpointer, input.sourceThreadId, source);
+  const expected = new Set(checkpoints.map(checkpointKey));
+  if (existing.some((tuple) => !expected.has(checkpointKey(tuple)))) {
+    throw new WorkflowForkError(`fork thread has unrelated checkpoints: ${input.forkThreadId}`);
+  }
+  return { checkpoints, targetPopulated: existing.length > 0 };
+}
+
+async function copyPreparedClone(
+  input: CloneWorkflowCheckpointInput,
+  prepared: PreparedClone,
+): Promise<void> {
+  for (const entry of prepared.checkpoints) {
+    const metadata = entry.metadata;
+    if (metadata === undefined) throw new WorkflowForkError("source checkpoint metadata is missing");
+    const namespace = checkpointNamespace(entry);
+    const storedConfig = await input.checkpointer.put(
+      targetConfig(input.forkThreadId, namespace, parentCheckpointId(entry)),
+      entry.checkpoint,
+      forkMetadata(metadata),
+      entry.checkpoint.channel_versions,
+    );
+    await copyPendingWrites(input.checkpointer, storedConfig, entry.pendingWrites ?? []);
+  }
+  await input.retainArtifacts?.(input.forkThreadId, checkpointArtifacts(prepared.checkpoints));
 }
 
 function checkpointConfig(threadId: string, checkpointId: string): RunnableConfig {

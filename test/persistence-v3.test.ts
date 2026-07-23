@@ -54,6 +54,25 @@ test("reads v2 global mutation journals and emits the current file version", () 
   expect(parsed.mutations["implement:0"]).toEqual({ status: "completed", output: "done" });
 });
 
+test("keeps structurally valid v3 checkpoints inspectable without replay binding", () => {
+  // Given: metadata-free storage written by the previous v3 format.
+  const raw = JSON.stringify({
+    version: 3,
+    threadId: "legacy-v3-thread",
+    storage: {},
+    writes: {},
+    mutations: {},
+  });
+
+  // When: the current parser loads the old file.
+  const parsed = parseSerializedThread(raw, "legacy-v3.checkpoint.json");
+
+  // Then: provenance is retained without inventing replay data.
+  expect(parsed.sourceVersion).toBe(3);
+  expect(parsed.version).toBe(FILE_VERSION);
+  expect("replayBinding" in parsed).toBe(false);
+});
+
 test("replays a scoped change mutation after a file-saver restart", async () => {
   // Given: a completed scoped mutation claim for one workspace plan change.
   const root = await mkdtemp(join(tmpdir(), "pi-langgraph-scoped-mutation-"));

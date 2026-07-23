@@ -390,6 +390,49 @@ test("preserves concurrent contents in a parent created by a failed publication"
   }
 });
 
+test("serializes independent source publications and rejects the stale transaction", async () => {
+  // Given: two transactions captured from the same exact source baseline.
+  const root = await mkdtemp(join(tmpdir(), "pi-langgraph-publication-lock-"));
+  const repository = join(root, "repository");
+  await mkdir(repository);
+  await writeFile(join(repository, "source.ts"), "export const value = 1;\n");
+  const first = await SourceTreeTransaction.open(repository);
+  const second = await SourceTreeTransaction.open(repository);
+  const firstPublishing = Promise.withResolvers<void>();
+  const releaseFirst = Promise.withResolvers<void>();
+  try {
+    const firstAction = first.publish(
+      ["source.ts"],
+      (candidateRoot) => writeFile(join(candidateRoot, "source.ts"), "export const value = 2;\n"),
+      async (candidateRoot) => {
+        firstPublishing.resolve();
+        await releaseFirst.promise;
+        await copyFile(join(candidateRoot, "source.ts"), join(repository, "source.ts"));
+      },
+    );
+    await firstPublishing.promise;
+
+    // When: the second transaction attempts to publish while the first owns the source-root lock.
+    const secondAction = second.publish(
+      ["source.ts"],
+      (candidateRoot) => writeFile(join(candidateRoot, "source.ts"), "export const value = 3;\n"),
+      (candidateRoot) => copyFile(join(candidateRoot, "source.ts"), join(repository, "source.ts")),
+    );
+    releaseFirst.resolve();
+    const results = await Promise.allSettled([firstAction, secondAction]);
+
+    // Then: only the lock owner publishes and the stale baseline is rejected after lock acquisition.
+    expect(results[0].status).toBe("fulfilled");
+    expect(results[1].status === "rejected" ? results[1].reason : undefined)
+      .toMatchObject({ operation: "snapshot" });
+    expect(await readFile(join(repository, "source.ts"), "utf8")).toBe("export const value = 2;\n");
+  } finally {
+    releaseFirst.resolve();
+    await Promise.all([first.close(), second.close()]);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("validates every authorized entry before publishing any mutation", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-langgraph-isolation-fifo-"));
   const repository = join(root, "repository");

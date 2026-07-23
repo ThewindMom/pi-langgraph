@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
-import { cp, lstat, mkdtemp, readdir, readFile, readlink, rm, rmdir } from "node:fs/promises";
+import { cp, lstat, mkdtemp, readdir, readFile, readlink, realpath, rm, rmdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { withFileLock } from "../persistence/file-lock.ts";
+
+const SOURCE_PUBLICATION_LOCK_KEY_PREFIX = "pi-langgraph-source-publication:";
 
 type SourceEntry = Readonly<{
   kind: "directory" | "file" | "symlink" | "special";
@@ -28,16 +31,17 @@ export class SourceTreeTransaction {
   ) {}
 
   static async open(sourceRoot: string): Promise<SourceTreeTransaction> {
-    const before = await captureTree(sourceRoot);
-    const transactionRoot = await mkdtemp(join(dirname(sourceRoot), ".pi-langgraph-source-"));
+    const canonicalRoot = await realpath(sourceRoot);
+    const before = await captureTree(canonicalRoot);
+    const transactionRoot = await mkdtemp(join(dirname(canonicalRoot), ".pi-langgraph-source-"));
     const baselineRoot = join(transactionRoot, "baseline");
     try {
-      await cp(sourceRoot, baselineRoot, copyOptions());
-      const [after, baseline] = await Promise.all([captureTree(sourceRoot), captureTree(baselineRoot)]);
+      await cp(canonicalRoot, baselineRoot, copyOptions());
+      const [after, baseline] = await Promise.all([captureTree(canonicalRoot), captureTree(baselineRoot)]);
       if (changedPaths(before, after).length > 0 || changedPaths(after, baseline).length > 0) {
         throw new SourceTreeTransactionError("snapshot", "source repository changed while its transaction snapshot was created");
       }
-      return new SourceTreeTransaction(sourceRoot, transactionRoot, baselineRoot, baseline);
+      return new SourceTreeTransaction(canonicalRoot, transactionRoot, baselineRoot, baseline);
     } catch (error) {
       await rm(transactionRoot, { recursive: true, force: true });
       throw error;
@@ -54,29 +58,52 @@ export class SourceTreeTransaction {
     throw fail(changed);
   }
 
+  async assertPathUnchanged(path: string, fail: (path: string) => Error): Promise<void> {
+    if (sameEntry(this.baseline.get(path), await optionalSourceEntry(this.sourceRoot, path))) return;
+    throw fail(path);
+  }
+
   async publish(
     paths: readonly string[],
     stage: (candidateRoot: string) => Promise<void>,
     publishCandidate: (candidateRoot: string) => Promise<void>,
   ): Promise<void> {
     const candidateRoot = join(this.transactionRoot, "candidate");
-    let candidate: SourceTree | undefined;
     try {
       await cp(this.baselineRoot, candidateRoot, copyOptions());
       await stage(candidateRoot);
-      candidate = await captureTree(candidateRoot);
-      await publishCandidate(candidateRoot);
-    } catch (error) {
-      try {
-        if (candidate !== undefined) await this.rollbackPublished(paths, candidate);
-      } catch (rollbackError) {
-        throw new SourceTreeTransactionError(
-          "rollback",
-          "publication failed and the source repository could not be rolled back",
-          rollbackError,
-        );
-      }
-      throw error;
+      const candidate = await captureTree(candidateRoot);
+      await withFileLock(
+        dirname(this.sourceRoot),
+        `${SOURCE_PUBLICATION_LOCK_KEY_PREFIX}${this.sourceRoot}`,
+        async () => {
+          await this.assertSourceUnchanged((changed) => new SourceTreeTransactionError(
+            "snapshot",
+            `source repository changed before publication: ${changed.join(", ")}`,
+          ));
+          try {
+            await publishCandidate(candidateRoot);
+            const mismatched = changedPaths(candidate, await captureTree(this.sourceRoot));
+            if (mismatched.length > 0) {
+              throw new SourceTreeTransactionError(
+                "snapshot",
+                `published source tree does not match its staged snapshot: ${mismatched.join(", ")}`,
+              );
+            }
+          } catch (error) {
+            try {
+              await this.rollbackPublished(paths, candidate);
+            } catch (rollbackError) {
+              throw new SourceTreeTransactionError(
+                "rollback",
+                "publication failed and the source repository could not be rolled back",
+                rollbackError,
+              );
+            }
+            throw error;
+          }
+        },
+      );
     } finally {
       await rm(candidateRoot, { recursive: true, force: true });
     }
@@ -194,6 +221,15 @@ async function sourceEntry(root: string, path: string): Promise<SourceEntry> {
       ? Buffer.from(await readlink(absolute))
       : Buffer.from(kind);
   return { kind, mode: info.mode, digest: createHash("sha256").update(content).digest("hex") };
+}
+
+async function optionalSourceEntry(root: string, path: string): Promise<SourceEntry | undefined> {
+  try {
+    return await sourceEntry(root, path);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
+    throw error;
+  }
 }
 
 function changedPaths(before: SourceTree, after: SourceTree): readonly string[] {

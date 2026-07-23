@@ -6,6 +6,8 @@ import {
 
 const PHASES = new Set(["classified", "discovered", "analyzed", "implemented", "verified", "diagnosed", "repaired", "synthesized", "escalated"]);
 const STATUSES = new Set(["running", "awaiting_approval", "completed", "needs_attention"]);
+export const SEMANTIC_CHECKPOINT_LABELS = ["post-discovery", "pre-mutation", "last-known-green", "post-repair"] as const;
+export type SemanticCheckpointLabel = typeof SEMANTIC_CHECKPOINT_LABELS[number];
 const WORKFLOW_CHANNELS = ["objective", "pattern", "maxIterations", "approvalRequired", "discoveryRound", "workItems", "acceptanceCriteria", "findings", "changes", "verification", "diagnostic", "currentWorkItem", "iteration", "phase", "status", "summary", "unresolvedRisks", "trace", "plan", "changeResults", "evidenceRefs", "interrupt"] as const;
 const OPTIONAL_WORKFLOW_CHANNELS = new Set(["verification", "diagnostic", "currentWorkItem", "plan", "changeResults", "evidenceRefs", "interrupt"]);
 const REQUIRED_WORKFLOW_CHANNELS = WORKFLOW_CHANNELS.filter((channel) => !OPTIONAL_WORKFLOW_CHANNELS.has(channel));
@@ -55,6 +57,33 @@ export function validatePersistedWorkflowChannels(value: unknown): void {
 }
 
 export function isPersistedWorkflowChannel(channel: string): boolean { return WORKFLOW_CHANNELS.some((candidate) => candidate === channel); }
+
+export function semanticCheckpointLabels(value: unknown): readonly SemanticCheckpointLabel[] {
+  if (typeof value !== "object" || value === null || Array.isArray(value) || !("phase" in value)) return [];
+  switch (value.phase) {
+    case "analyzed":
+      return ["post-discovery", "pre-mutation"];
+    case "verified":
+    case "synthesized":
+      return hasPassedVerification(value) ? ["last-known-green"] : [];
+    case "repaired":
+      return ["post-repair"];
+    default:
+      return [];
+  }
+}
+
+function hasPassedVerification(value: Readonly<Record<string, unknown>>): boolean {
+  if (
+    "verification" in value && typeof value.verification === "object" && value.verification !== null &&
+    "passed" in value.verification && value.verification.passed === true
+  ) return true;
+  if (!("changeResults" in value) || !Array.isArray(value.changeResults)) return false;
+  const latest: unknown = value.changeResults.at(-1);
+  return typeof latest === "object" && latest !== null && "verification" in latest &&
+    typeof latest.verification === "object" && latest.verification !== null &&
+    "passed" in latest.verification && latest.verification.passed === true;
+}
 
 export function validatePersistedWorkflowWrite(channel: string, value: unknown): void {
   switch (channel) {

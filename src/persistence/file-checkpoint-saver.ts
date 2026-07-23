@@ -1,18 +1,17 @@
-import { createHash, randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, readdir, rename, unlink } from "node:fs/promises";
+import { chmod, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import type { RunnableConfig } from "@langchain/core/runnables";
 import {
   BaseCheckpointSaver, MemorySaver, type ChannelVersions, type Checkpoint, type CheckpointListOptions,
   type CheckpointMetadata, type CheckpointTuple, type PendingWrite,
 } from "@langchain/langgraph-checkpoint";
-import { FILE_SUFFIX, fileNameForThread, parseSerializedThread, validateThreadId } from "./file-checkpoint-format.ts";
-import { atomicWrite, isNodeErrorCode, readBoundedFile } from "./checkpoint-file-io.ts";
+import { fileNameForThread, parseSerializedThread, validateThreadId } from "./file-checkpoint-format.ts";
+import { atomicWrite, checkpointFileFingerprint, isNodeErrorCode, readBoundedFile } from "./checkpoint-file-io.ts";
+import { initializeCheckpointDirectory } from "./checkpoint-directory-loader.ts";
+import { encodeCheckpointThread, hydrateCheckpointThread } from "./checkpoint-thread-codec.ts";
 import {
-  encodeCheckpointThread,
-  hydrateCheckpointThread,
-  type RepositoryCheckpointIdentity,
-} from "./checkpoint-thread-codec.ts";
+  CheckpointMetadataBindings, type RepositoryCheckpointIdentity, type ReplaySafetyContext,
+} from "./checkpoint-replay-metadata.ts";
 import { withCheckpointFileLock } from "./file-lock.ts";
 import { requiredThreadId } from "./checkpoint-config.ts";
 import { restoreThread, snapshotThread } from "./checkpoint-memory-snapshot.ts";
@@ -28,7 +27,7 @@ export class FileCheckpointSaver extends BaseCheckpointSaver implements Mutation
   private readonly corruptFiles = new Map<string, { readonly quarantineName: string; readonly error: string }>();
   private readonly mutations = new Map<string, Record<string, SerializedMutationEntry>>();
   private readonly fingerprints = new Map<string, string>();
-  private readonly repositorySnapshots = new Map<string, RepositoryCheckpointIdentity>();
+  private readonly metadataBindings = new CheckpointMetadataBindings();
   private pending: Promise<void> = Promise.resolve();
 
   private constructor(rootDirectory: string) {
@@ -39,25 +38,9 @@ export class FileCheckpointSaver extends BaseCheckpointSaver implements Mutation
 
   static async open(rootDirectory: string): Promise<FileCheckpointSaver> {
     const saver = new FileCheckpointSaver(rootDirectory);
-    await mkdir(rootDirectory, { recursive: true, mode: 0o700 });
-    const rootStat = await lstat(rootDirectory);
-    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
-      throw new Error(`checkpoint root must be a real directory: ${rootDirectory}`);
-    }
-    await chmod(rootDirectory, 0o700);
-    const entries = await readdir(rootDirectory, { withFileTypes: true });
-    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-      if (!entry.isFile() || !entry.name.endsWith(FILE_SUFFIX)) continue;
-      try {
-        await saver.loadFile(entry.name);
-      } catch (error) {
-        const quarantineName = `${entry.name}.corrupt-${randomUUID()}`;
-        await rename(join(rootDirectory, entry.name), join(rootDirectory, quarantineName));
-        await chmod(join(rootDirectory, quarantineName), 0o600);
-        const message = error instanceof Error ? error.message : "checkpoint load failed with a non-Error value";
-        saver.quarantinedFiles.push({ fileName: quarantineName, error: message });
-        saver.corruptFiles.set(entry.name, { quarantineName, error: message });
-      }
+    for (const entry of await initializeCheckpointDirectory(rootDirectory, (fileName) => saver.loadFile(fileName))) {
+      saver.quarantinedFiles.push({ fileName: entry.quarantineName, error: entry.error });
+      saver.corruptFiles.set(entry.sourceName, { quarantineName: entry.quarantineName, error: entry.error });
     }
     return saver;
   }
@@ -74,14 +57,14 @@ export class FileCheckpointSaver extends BaseCheckpointSaver implements Mutation
     for await (const tuple of this.memory.list(config, options)) yield tuple;
   }
 
-  async listThreads(): Promise<readonly string[]> {
-    await this.pending;
-    return Object.keys(this.memory.storage).sort();
-  }
+  async listThreads(): Promise<readonly string[]> { await this.pending; return Object.keys(this.memory.storage).sort(); }
 
   bindRepositorySnapshot(threadId: string, identity: RepositoryCheckpointIdentity): void {
-    validateThreadId(threadId);
-    this.repositorySnapshots.set(threadId, identity);
+    validateThreadId(threadId); this.metadataBindings.bindRepositorySnapshot(threadId, identity);
+  }
+
+  bindReplaySafety(threadId: string, context: ReplaySafetyContext): void {
+    validateThreadId(threadId); this.metadataBindings.bindReplaySafety(threadId, context);
   }
 
   async put(config: RunnableConfig, checkpoint: Checkpoint, metadata: CheckpointMetadata, _newVersions: ChannelVersions): Promise<RunnableConfig> {
@@ -89,10 +72,13 @@ export class FileCheckpointSaver extends BaseCheckpointSaver implements Mutation
     return this.mutateThread(threadId, async () => {
       const snapshot = snapshotThread(this.memory, threadId);
       try {
-        const repositorySnapshot = this.repositorySnapshots.get(threadId);
-        const storedMetadata = repositorySnapshot === undefined
-          ? metadata
-          : { ...metadata, repositorySnapshot };
+        const storedMetadata = this.metadataBindings.storedMetadata({
+          memory: this.memory,
+          config,
+          checkpoint,
+          metadata,
+          threadId,
+        });
         const result = await this.memory.put(config, checkpoint, storedMetadata);
         await this.persistThread(threadId);
         return result;
@@ -140,7 +126,7 @@ export class FileCheckpointSaver extends BaseCheckpointSaver implements Mutation
       await this.memory.deleteThread(threadId);
       this.mutations.delete(threadId);
       this.fingerprints.delete(threadId);
-      this.repositorySnapshots.delete(threadId);
+      this.metadataBindings.clear(threadId);
       const corrupt = this.corruptFiles.get(fileNameForThread(threadId));
       if (corrupt !== undefined) {
         await unlink(join(this.rootDirectory, corrupt.quarantineName));
@@ -209,7 +195,7 @@ export class FileCheckpointSaver extends BaseCheckpointSaver implements Mutation
     const value = parseSerializedThread(raw, path);
     if (fileName !== fileNameForThread(value.threadId)) throw new Error(`checkpoint filename does not match its thread id: ${path}`);
     this.mutations.set(value.threadId, { ...await hydrateCheckpointThread(this.memory, value, path) });
-    this.fingerprints.set(value.threadId, fingerprint(raw));
+    this.fingerprints.set(value.threadId, checkpointFileFingerprint(raw));
     await chmod(path, 0o600);
   }
 
@@ -217,7 +203,7 @@ export class FileCheckpointSaver extends BaseCheckpointSaver implements Mutation
     try {
       const fileName = fileNameForThread(threadId);
       const raw = await readBoundedFile(join(this.rootDirectory, fileName));
-      if (this.fingerprints.get(threadId) !== fingerprint(raw)) await this.loadFile(fileName, raw);
+      if (this.fingerprints.get(threadId) !== checkpointFileFingerprint(raw)) await this.loadFile(fileName, raw);
     } catch (error) {
       if (!isNodeErrorCode(error, "ENOENT")) throw error;
       restoreThread(this.memory, threadId, { writes: [] });
@@ -229,7 +215,7 @@ export class FileCheckpointSaver extends BaseCheckpointSaver implements Mutation
   private async persistThread(threadId: string): Promise<void> {
     const raw = encodeCheckpointThread(this.memory, threadId, this.mutations.get(threadId) ?? Object.create(null));
     await atomicWrite(this.rootDirectory, this.pathForThread(threadId), raw);
-    this.fingerprints.set(threadId, fingerprint(raw));
+    this.fingerprints.set(threadId, checkpointFileFingerprint(raw));
   }
 
   private pathForThread(threadId: string): string { return join(this.rootDirectory, fileNameForThread(threadId)); }
@@ -238,8 +224,4 @@ export class FileCheckpointSaver extends BaseCheckpointSaver implements Mutation
     const corrupt = this.corruptFiles.get(fileNameForThread(threadId));
     if (corrupt !== undefined) throw new Error(`checkpoint is corrupt for thread ${JSON.stringify(threadId)}: ${corrupt.error}`);
   }
-}
-
-function fingerprint(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
 }

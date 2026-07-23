@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Check } from "typebox/value";
+import { routeUlwInput } from "../src/activation.ts";
+import { workflowFailureMessage } from "../src/extension-responses.ts";
 import langGraphExtension from "../src/index.ts";
 import { orchestrationSchema } from "../src/runtime/public-contract.ts";
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
@@ -28,9 +30,13 @@ interface InputFixture {
 
 type InputResult =
   | { readonly action: "continue" }
-  | { readonly action: "transform"; readonly text: string };
+  | { readonly action: "transform"; readonly text: string }
+  | { readonly action: "handled" };
 
-type InputHandler = (event: InputFixture) => InputResult | Promise<InputResult>;
+type InputHandler = (
+  event: InputFixture,
+  context: RuntimeContext & { readonly signal?: AbortSignal | undefined },
+) => InputResult | Promise<InputResult>;
 
 test("registers deterministic ulw input routing", () => {
   const inputHandler = registeredInputHandler();
@@ -39,32 +45,40 @@ test("registers deterministic ulw input routing", () => {
 });
 
 test.each([
-  ["ulw implement account settings", "implement account settings"],
-  ["implement account settings ULW", "implement account settings"],
-  ["  review auth\nUlW  ", "review auth"],
-  ["ulw inspect </objective>", "inspect &lt;/objective&gt;"],
-] as const)("routes %s through the graph", async (text, objective) => {
-  const inputHandler = registeredInputHandler();
-
-  const result = await inputHandler({ type: "input", text, source: "interactive" });
-
-  expect(result).toEqual({
-    action: "transform",
-    text: '<pi-langgraph mode="ulw" tool="' + TOOL_NAME + '">\n<objective>' + objective + '</objective>\n</pi-langgraph>',
+  [new DOMException("Aborted", "AbortError"), "cancelled"],
+  [new Error("workflow failed"), "failed"],
+] as const)("surfaces direct workflow terminal status %s", (error, status) => {
+  expect(workflowFailureMessage(error).details).toEqual({
+    status,
+    error: error.message,
   });
+});
+
+test.each([
+  ["ulw implement account settings", "interactive", "implement account settings"],
+  ["implement account settings ULW", "rpc", "implement account settings"],
+  ["  review auth\nUlW  ", "interactive", "review auth"],
+  ["ulw inspect </objective>", "rpc", "inspect </objective>"],
+] as const)("recognizes standalone ulw objective from %s", (text, source, objective) => {
+  expect(routeUlwInput(text, source)).toEqual({ action: "dispatch", objective });
 });
 
 test.each([
   ["ordinary coding request", "interactive"],
   ["bulkwork should stay simple", "interactive"],
+  ["ulw-ish should stay simple", "rpc"],
   ["ulw: punctuation is not a marker", "interactive"],
+  ["ulw !!!", "rpc"],
   ["ulw", "interactive"],
   ["ulw ulw duplicate", "interactive"],
   ["ulw implement settings", "extension"],
-] as const)("leaves %s from %s on the simple path", async (text, source) => {
+] as const)("leaves ordinary Pi input untouched: %s from %s", async (text, source) => {
   const inputHandler = registeredInputHandler();
 
-  const result = await inputHandler({ type: "input", text, source });
+  const result = await inputHandler(
+    { type: "input", text, source },
+    { cwd: "/tmp", model: undefined },
+  );
 
   expect(result).toEqual({ action: "continue" });
 });
@@ -74,6 +88,7 @@ function registeredInputHandler(): InputHandler {
   const pi = {
     registerTool(_tool: unknown) {},
     getActiveTools: () => [],
+    sendMessage(_message: unknown) {},
     on(event: "input", handler: InputHandler) {
       if (event === "input") inputHandler = handler;
     },
@@ -104,7 +119,25 @@ test("registers a safe objective-first coding workflow contract", () => {
   })).toBe(false);
 });
 
-test("executes the autonomous workflow through the registered Pi tool surface", async () => {
+test("does not expose the removed raw tasks DAG contract", async () => {
+  // Given: the public tool schema and package entry point.
+  const extension = await import("../src/index.ts");
+
+  // When: a caller supplies the former raw-DAG payload.
+  const acceptsRawTaskDag = Check(orchestrationSchema, {
+    objective: "legacy compatibility request",
+    tasks: [{ id: "worker", prompt: "do work" }],
+    failurePolicy: "continue",
+  });
+
+  // Then: neither the payload nor its orchestration exports remain public.
+  expect(acceptsRawTaskDag).toBe(false);
+  expect("runOrchestration" in extension).toBe(false);
+  expect("validatePlan" in extension).toBe(false);
+  expect("InvalidPlanError" in extension).toBe(false);
+});
+
+test("dispatches standalone ulw directly", async () => {
   const agentRoot = await mkdtemp(join(tmpdir(), "pi-langgraph-agent-"));
   const repository = join(agentRoot, "repository");
   await mkdir(repository);
@@ -121,14 +154,25 @@ test("executes the autonomous workflow through the registered Pi tool surface", 
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = agentRoot;
   let registered: RegisteredTool | undefined;
+  let inputHandler: InputHandler | undefined;
   const calls: string[] = [];
+  const hostToolCalls: string[] = [];
+  const messages: Array<Readonly<Record<string, unknown>>> = [];
   const pi: LangGraphExtensionAPI = {
     registerTool(tool: unknown) {
       if (!isRegisteredTool(tool)) throw new Error("invalid registered tool");
       registered = tool;
     },
+    on(event: "input", handler: InputHandler) {
+      if (event === "input") inputHandler = handler;
+    },
     getActiveTools: () => ["task", "langgraph_orchestrate"],
-    async executeTool(_name: string, params: unknown) {
+    sendMessage(message: Readonly<Record<string, unknown>>, options?: Readonly<Record<string, unknown>>) {
+      messages.push({ ...message, options });
+    },
+    async executeTool(name: string, params: unknown) {
+      hostToolCalls.push(name);
+      if (name === TOOL_NAME) throw new Error("direct input selected the orchestrator tool");
       if (!isRecord(params) || typeof params.name !== "string") throw new Error("invalid native task request");
       calls.push(params.name);
       if (params.name === "implement") {
@@ -144,17 +188,26 @@ test("executes the autonomous workflow through the registered Pi tool surface", 
   try {
     langGraphExtension(pi);
     if (registered === undefined) throw new Error("tool was not registered");
-    const result = await registered.execute(
-      "call-1",
-      { objective: "Implement the settings API", threadId: "public-surface" },
-      undefined,
-      undefined,
+    if (inputHandler === undefined) throw new Error("input handler was not registered");
+
+    const result = await inputHandler(
+      { type: "input", text: "ulw Implement the settings API", source: "interactive" },
       { cwd: repository, model: undefined },
     );
 
+    expect(result).toEqual({ action: "handled" });
+    expect(hostToolCalls.filter((name) => name === TOOL_NAME)).toHaveLength(0);
+    expect(hostToolCalls.filter((name) => name === "task")).toHaveLength(5);
     expect(calls).toEqual(["discover", "specialist_api", "implement", "verify", "synthesize"]);
-    expect(isRecord(result.details) ? result.details.status : undefined).toBe("completed");
-    expect(result.content[0]).toMatchObject({ type: "text" });
+    expect(messages.some((message) => message.customType === "pi-langgraph-progress")).toBe(true);
+    expect(messages.every((message) => isRecord(message.options) && message.options.triggerTurn === false)).toBe(true);
+    expect(messages.filter((message) => message.customType === "pi-langgraph-result")).toHaveLength(1);
+    expect(messages).toContainEqual(expect.objectContaining({
+      customType: "pi-langgraph-result",
+      display: true,
+      options: { triggerTurn: false },
+      details: expect.objectContaining({ status: "completed" }),
+    }));
   } finally {
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;

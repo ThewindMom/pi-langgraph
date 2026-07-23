@@ -10,12 +10,15 @@ import type {
 } from "./types.ts";
 import { isAggregatePlan } from "./compiler.ts";
 import { parseScopedInterrupt } from "./risk-policy.ts";
+import { checkpointReplayMetadata } from "../persistence/checkpoint-thread-codec.ts";
+import type { SemanticCheckpointLabel } from "../persistence/workflow-state-validation.ts";
 
 export interface WorkflowHistoryEntry {
   readonly checkpointId: string;
   readonly parentCheckpointId?: string;
   readonly step?: number;
   readonly phase?: WorkflowPhase;
+  readonly semanticLabels: readonly SemanticCheckpointLabel[];
   readonly trace: readonly WorkflowTraceEvent[];
 }
 
@@ -29,6 +32,7 @@ export function projectHistoryEntry(tuple: CheckpointTuple): WorkflowHistoryEntr
     ...(typeof parentCheckpointId === "string" ? { parentCheckpointId } : {}),
     ...(typeof tuple.metadata?.step === "number" ? { step: tuple.metadata.step } : {}),
     ...(phase === undefined ? {} : { phase }),
+    semanticLabels: checkpointReplayMetadata(tuple.metadata)?.semanticLabels ?? [],
     trace: traceValue(tuple.checkpoint.channel_values.trace),
   };
 }

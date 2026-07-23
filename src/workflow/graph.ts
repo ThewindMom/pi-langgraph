@@ -1,6 +1,6 @@
 import { END, START, StateGraph } from "@langchain/langgraph";
 import type { BaseCheckpointSaver } from "@langchain/langgraph-checkpoint";
-import type { ExecutionRequest, OrchestrationTask } from "../types.ts";
+import type { ExecutionRequest, WorkerTask } from "../types.ts";
 import { RepositoryIsolationError } from "../repository/mutation-scope.ts";
 import type {
   MutationExecution,
@@ -54,7 +54,7 @@ export function compileCodingGraph(
     retryOn: shouldRetryWorkerError,
   };
 
-  const execute = async (task: OrchestrationTask, objective: string): Promise<string> => {
+  const execute = async (task: WorkerTask, objective: string): Promise<string> => {
     const total = 1;
     dependencies.onProgress?.({ taskId: task.id, status: "started", completed: 0, total });
     const request: ExecutionRequest = { objective, task, dependencyResults: [] };
@@ -87,7 +87,7 @@ export function compileCodingGraph(
   };
 
   const executeMutation = async (
-    task: OrchestrationTask,
+    task: WorkerTask,
     objective: string,
     operation: MutationOperation,
   ): Promise<MutationExecution> => {

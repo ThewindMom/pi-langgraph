@@ -1,5 +1,5 @@
 import { Command } from "@langchain/langgraph";
-import type { OrchestrationTask } from "../types.ts";
+import type { WorkerTask } from "../types.ts";
 import type { MutationExecution, MutationOperation } from "../persistence/mutation-journal.ts";
 import {
   InvalidWorkerOutputError,
@@ -16,9 +16,9 @@ import { isAggregatePlan } from "./compiler.ts";
 import { hostIntegrationVerification } from "./host-verification.ts";
 import type { HostEvidenceExecutor } from "./types.ts";
 
-type ExecuteWorker = (task: OrchestrationTask, objective: string) => Promise<string>;
+type ExecuteWorker = (task: WorkerTask, objective: string) => Promise<string>;
 type ExecuteMutation = (
-  task: OrchestrationTask,
+  task: WorkerTask,
   objective: string,
   operation: MutationOperation,
 ) => Promise<MutationExecution>;
